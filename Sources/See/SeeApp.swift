@@ -2728,6 +2728,33 @@ private struct WebsiteSurfaceView: View {
     }
 }
 
+/// Frosted glass that samples the screen *behind* See's window. A plain SwiftUI
+/// material only blends with what is inside the window, so See's own dim layer
+/// and gradient tinted every widget; this reads the real background instead.
+private struct BehindWindowGlass: NSViewRepresentable {
+    var material: NSVisualEffectView.Material = .underWindowBackground
+    var scrim: Double = 0.22
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = material
+        view.blendingMode = .behindWindow
+        view.state = .active
+        view.isEmphasized = false
+        let dark = NSView()
+        dark.wantsLayer = true
+        dark.layer?.backgroundColor = NSColor.black.withAlphaComponent(scrim).cgColor
+        dark.autoresizingMask = [.width, .height]
+        view.addSubview(dark)
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {
+        view.material = material
+        view.subviews.first?.layer?.backgroundColor = NSColor.black.withAlphaComponent(scrim).cgColor
+    }
+}
+
 // MARK: - Native widget card
 
 /// AppKit drag handler that gives jitter-free move/resize for native widgets.
@@ -2869,7 +2896,10 @@ private struct NativeWidgetView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(20)
                 .frame(width: widget.size.width, height: widget.size.height)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 23))
+                .background {
+                    BehindWindowGlass()
+                        .clipShape(RoundedRectangle(cornerRadius: 23, style: .continuous))
+                }
                 .overlay(RoundedRectangle(cornerRadius: 23).stroke(.white.opacity(0.18), lineWidth: 1))
                 .compositingGroup()
                 .shadow(color: .black.opacity(widget.isDragging ? 0.24 : 0.36),
