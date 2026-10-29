@@ -2493,7 +2493,6 @@ private struct SeeOverlay: View {
                         }
                     },
                     onDismiss: { point in
-                        if FnState.held { model.pinned = true }
                         withAnimation(.easeOut(duration: 0.16)) {
                             model.contextMenuPoint = nil; model.surfaceMenu = nil
                         }
@@ -2772,7 +2771,16 @@ private struct SeeOverlay: View {
                         .font(.system(size: 11, weight: .regular)).foregroundStyle(.tertiary)
                 }
                 Button {
-                    model.pinned.toggle()
+                    if model.pinned {
+                        if FnState.held {
+                            // Still holding Fn: just unpin, the release closes it.
+                            model.pinned = false
+                        } else {
+                            onClose()
+                        }
+                    } else {
+                        model.pinned = true
+                    }
                 } label: {
                     Image(systemName: model.pinned ? "pin.fill" : "pin")
                         .font(.system(size: 12, weight: .semibold))
