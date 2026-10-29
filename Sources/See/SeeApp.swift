@@ -1166,6 +1166,22 @@ private struct NativeWidgetView: View {
                                       onMoveActive: { hover.nearMove = $0 },
                                       onResizeActive: { hover.nearResize = $0 })
                 }
+                // SwiftUI-driven proximity fallback: AppKit mouseMoved is not
+                // always delivered through the hosting view, which left the
+                // move bar invisible and the widget apparently undraggable.
+                .onContinuousHover { phase in
+                    switch phase {
+                    case .active(let p):
+                        let w = widget.size.width, h = widget.size.height
+                        let nearMove = p.y > h - 68 && abs(p.x - w / 2) < 84
+                        let nearResize = p.x > w - 68 && p.y > h - 68
+                        if nearMove != hover.nearMove { hover.nearMove = nearMove }
+                        if nearResize != hover.nearResize { hover.nearResize = nearResize }
+                    case .ended:
+                        if hover.nearMove { hover.nearMove = false }
+                        if hover.nearResize { hover.nearResize = false }
+                    }
+                }
 
             // Close button — always present, opacity controlled
             Button(action: onClose) {
