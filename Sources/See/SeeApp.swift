@@ -2849,8 +2849,8 @@ private struct WebsiteSurfaceView: View {
 /// and gradient tinted every widget; this reads the real background instead.
 private struct BehindWindowGlass: NSViewRepresentable {
     var material: NSVisualEffectView.Material = .underWindowBackground
-    /// 30% transparency: the dark glass tint sits at 0.70 over the blur.
-    var scrim: Double = 0.70
+    /// No tint of See's own: the widget shows exactly what is behind it.
+    var scrim: Double = 0.0
 
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
@@ -3014,15 +3014,8 @@ private struct NativeWidgetView: View {
                 .padding(20)
                 .frame(width: widget.size.width, height: widget.size.height)
                 .background {
-                    ZStack {
-                        BehindWindowGlass()
-                        // The scrim itself is the 70% dark tint; this only adds
-                        // the crisp highlight along the top edge.
-                        LinearGradient(colors: [.white.opacity(0.16), .white.opacity(0.0),
-                                                .white.opacity(0.03)],
-                                       startPoint: .top, endPoint: .bottom)
-                    }
-                    .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                    BehindWindowGlass()
+                        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                 }
                 .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous)
                     .strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
@@ -3224,7 +3217,7 @@ private struct TimerView: View {
         let total = Int(entry.remaining.rounded())
         VStack(spacing: 12) {
             Text(String(format: "%02d:%02d", total / 60, total % 60))
-                .font(.system(size: 54, weight: .heavy, design: .rounded))
+                .font(.system(size: 52, weight: .semibold, design: .default))
                 .monospacedDigit().foregroundStyle(ink)
             HStack(spacing: 10) {
                 Button { store.toggle(widget.id, minutes: minutes) } label: {
