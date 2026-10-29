@@ -198,14 +198,11 @@ final class WorkspaceInteractionView: NSView {
             guard let self else { return event }
             let belongsHere = event.window == nil || event.window === self.window
             if !belongsHere, event.type != .rightMouseDown { return event }
-            // Right-clicks can arrive without a window reference, so resolve the
-            // point from the screen when the event window is not ours.
-            let point: CGPoint = {
-                if event.window === self.window { return self.convert(event.locationInWindow, from: nil) }
-                guard let window = self.window else { return .zero }
-                let inWindow = window.convertPoint(fromScreen: NSEvent.mouseLocation)
-                return self.convert(inWindow, from: nil)
-            }()
+            // Always resolve the point from the live pointer position: a click
+            // that arrives while See is inactive (or from an event with no
+            // window) carries no trustworthy location of its own.
+            guard let window = self.window else { return event }
+            let point = self.convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
             switch event.type {
             case .rightMouseDown:
                 debugLog("right down at \(point)")
@@ -247,6 +244,38 @@ final class WorkspaceInteractionView: NSView {
 private func menuOrigin(for point: CGPoint, size: CGSize, menu: CGSize) -> CGPoint {
     CGPoint(x: min(max(point.x, 10), max(10, size.width - menu.width - 10)),
             y: min(max(point.y, 10), max(10, size.height - menu.height - 10)))
+}
+
+private struct WorkspaceMenuSizeKey: PreferenceKey {
+    static let defaultValue: CGSize = .zero
+    static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
+        let next = nextValue(); if next != .zero { value = next }
+    }
+}
+
+private struct SurfaceMenuSizeKey: PreferenceKey {
+    static let defaultValue: CGSize = .zero
+    static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
+        let next = nextValue(); if next != .zero { value = next }
+    }
+}
+
+@MainActor
+private final class MenuSizes: ObservableObject {
+    @Published var workspace: CGSize = MenuMetrics.workspace
+    @Published var surface: CGSize = MenuMetrics.surface
+}
+
+/// Reports a view's laid-out size so a menu can be placed by its real top-left
+/// corner instead of an assumed height.
+private struct MenuSizeReader: ViewModifier {
+    let onChange: (CGSize) -> Void
+    func body(content: Content) -> some View {
+        content.background(GeometryReader { proxy in
+            Color.clear.onAppear { onChange(proxy.size) }
+                .onChange(of: proxy.size) { _, size in onChange(size) }
+        })
+    }
 }
 
 private enum MenuMetrics {
@@ -528,7 +557,7 @@ private enum NativeWidgetKind: String, CaseIterable, Identifiable {
 }
 
 private enum WidgetPickerCategory: String, CaseIterable, Identifiable {
-    case websites = "Websites", widgets = "Widgets", apps = "Apps"
+    case websites = "Websites", widgets = "Widgets"
     var id: String { rawValue }
 }
 
@@ -592,11 +621,6 @@ private enum WorkspaceBackgroundStyle: String, CaseIterable, Identifiable {
         default: Color.black
         }
     }
-}
-
-private struct SelectableApp: Identifiable {
-    let name: String; let symbol: String; let bundleID: String
-    var id: String { bundleID }
 }
 
 // MARK: - Per-widget configuration
@@ -737,8 +761,17 @@ private enum PageScripts {
     })();
     """
 
+    /// Smart dark mode: instead of inverting the whole page (which turns every
+    /// hue and photo inside out), walk the DOM and darken only the light
+    /// surfaces, lighten only the dark text, and keep every hue where it was.
+    /// Same idea as the dynamic mode in Dark Reader, kept small enough to run on
+    /// a live page.
     static let darkMode = """
     (function(){
+      var MAX_NODES = 4500;
+      var store = window.__seeDarkStore || (window.__seeDarkStore = new Map());
+      var scheduled = false;
+
       function ensureStyle(){
         var style = document.getElementById('__see_dark');
         if (!style) {
@@ -746,51 +779,185 @@ private enum PageScripts {
           style.id = '__see_dark';
           (document.head || document.documentElement).appendChild(style);
         }
+        style.textContent = [
+          'html{background:#0f1013 !important;color-scheme:dark !important}',
+          'body{background-color:#0f1013 !important;color:#e6e6ea !important}',
+          '::selection{background:#3a3d46 !important;color:#ffffff !important}',
+          'input,textarea,select,button{color-scheme:dark !important}',
+          'img,video,picture,canvas{filter:none !important;opacity:1 !important}'
+        ].join(String.fromCharCode(10));
         return style;
       }
-      function luminance(color){
+
+      function parse(color){
         var m = (color || '').match(/[0-9.]+/g);
         if (!m || m.length < 3) { return null; }
-        // Fully transparent tells us nothing about the painted colour.
-        if (m.length > 3 && parseFloat(m[3]) === 0) { return null; }
-        return 0.299 * parseFloat(m[0]) + 0.587 * parseFloat(m[1]) + 0.114 * parseFloat(m[2]);
+        var a = m.length > 3 ? parseFloat(m[3]) : 1;
+        return [parseFloat(m[0]), parseFloat(m[1]), parseFloat(m[2]), a];
       }
-      function apply(){
-        var root = document.documentElement;
-        if (!root) { return; }
-        root.style.setProperty('color-scheme', 'dark', 'important');
-        var meta = document.querySelector('meta[name="color-scheme"]');
-        if (!meta && document.head) {
-          meta = document.createElement('meta');
-          meta.setAttribute('name', 'color-scheme');
-          meta.setAttribute('content', 'dark');
-          document.head.appendChild(meta);
-        } else if (meta) {
-          meta.setAttribute('content', 'dark');
+
+      function rgbToHsl(r, g, b){
+        r /= 255; g /= 255; b /= 255;
+        var max = Math.max(r, g, b), min = Math.min(r, g, b);
+        var h = 0, s = 0, l = (max + min) / 2;
+        if (max !== min) {
+          var d = max - min;
+          s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+          if (max === r) { h = (g - b) / d + (g < b ? 6 : 0); }
+          else if (max === g) { h = (b - r) / d + 2; }
+          else { h = (r - g) / d + 4; }
+          h /= 6;
         }
-        var style = ensureStyle();
-        var bodyLum = luminance(getComputedStyle(document.body || root).backgroundColor);
-        var rootLum = luminance(getComputedStyle(root).backgroundColor);
-        var bgLum = bodyLum === null ? rootLum : (rootLum === null ? bodyLum : Math.max(bodyLum, rootLum));
-        if (bgLum === null) { bgLum = 255; }   // both transparent: assume a light page
-        // The page ignored prefers-color-scheme and still paints a light
-        // background: invert it and let See's own dark chrome take over.
-        var needsInvert = bgLum !== null && bgLum > 140;
-        // WebKit ignores a filter on the root element, so invert the body.
-        style.textContent = needsInvert
-          ? 'html{background:#0b0b0d !important}'
-            + 'body{filter:invert(1) hue-rotate(180deg) !important;background:#f2f2f4 !important}'
-            + 'img,video,picture,canvas,svg image,[style*="background-image"]{filter:invert(1) hue-rotate(180deg) !important}'
-          : '';
+        return [h, s, l];
       }
+
+      function hslToRgb(h, s, l){
+        function hue(p, q, t){
+          if (t < 0) { t += 1; }
+          if (t > 1) { t -= 1; }
+          if (t < 1 / 6) { return p + (q - p) * 6 * t; }
+          if (t < 1 / 2) { return q; }
+          if (t < 2 / 3) { return p + (q - p) * (2 / 3 - t) * 6; }
+          return p;
+        }
+        if (s === 0) { var v = Math.round(l * 255); return [v, v, v]; }
+        var q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+        var p = 2 * l - q;
+        return [Math.round(hue(p, q, h + 1 / 3) * 255),
+                Math.round(hue(p, q, h) * 255),
+                Math.round(hue(p, q, h - 1 / 3) * 255)];
+      }
+
+      function remember(el, prop){
+        var key = el;
+        var props = store.get(key);
+        if (!props) { props = {}; store.set(key, props); }
+        if (!(prop in props)) { props[prop] = el.style.getPropertyValue(prop); }
+      }
+
+      function setProp(el, prop, value){
+        if (el.style.getPropertyValue(prop) === value
+            && el.style.getPropertyPriority(prop) === 'important') { return; }
+        remember(el, prop);
+        el.style.setProperty(prop, value, 'important');
+      }
+
+      function darken(alpha, hsl){
+        var l = Math.min(0.22, Math.max(0.09, 0.09 + (1 - hsl[2]) * 0.18));
+        var s2 = Math.min(hsl[1], 0.40);
+        var rgb = hslToRgb(hsl[0], s2, l);
+        return 'rgba(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ',' + alpha + ')';
+      }
+
+      function lighten(hsl){
+        // Keep the hue of coloured text, just lift it enough to read on dark.
+        var s2 = Math.min(hsl[1], 0.90);
+        var l = Math.max(hsl[2], 0.72);
+        var rgb = hslToRgb(hsl[0], s2, l);
+        return 'rgb(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ')';
+      }
+
+      function skip(el){
+        var tag = el.tagName;
+        return tag === 'IMG' || tag === 'VIDEO' || tag === 'CANVAS' || tag === 'IFRAME'
+          || tag === 'PICTURE' || tag === 'SOURCE' || tag === 'SVG' || tag === 'PATH';
+      }
+
+      function tune(el){
+        if (!el || el.nodeType !== 1 || skip(el)) { return; }
+        var cs;
+        try { cs = getComputedStyle(el); } catch (err) { return; }
+        if (cs.display === 'none' || cs.visibility === 'hidden') { return; }
+
+        var bg = parse(cs.backgroundColor);
+        var lightSurface = false;
+        if (bg && bg[3] > 0.04) {
+          var b = rgbToHsl(bg[0], bg[1], bg[2]);
+          if (b[2] > 0.40) {
+            setProp(el, 'background-color', darken(bg[3], b));
+            lightSurface = true;
+          }
+        }
+
+        var fg = parse(cs.color);
+        if (fg && fg[3] > 0.2) {
+          var f = rgbToHsl(fg[0], fg[1], fg[2]);
+          if (f[2] < 0.45 || (lightSurface && f[2] < 0.72)) {
+            setProp(el, 'color', lighten(f));
+          }
+        }
+
+        ['border-top-color', 'border-right-color', 'border-bottom-color', 'border-left-color']
+          .forEach(function(prop){
+            var side = parse(cs.getPropertyValue(prop));
+            if (!side || side[3] < 0.1) { return; }
+            var s2 = rgbToHsl(side[0], side[1], side[2]);
+            if (s2[2] > 0.55) {
+              var rgb = hslToRgb(s2[0], Math.min(s2[1], 0.25), 0.24);
+              setProp(el, prop, 'rgba(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ',' + side[3] + ')');
+            }
+          });
+
+        // Inline SVG icons are painted with currentColor or a literal light
+        // fill; keep strokes visible without touching real artwork.
+        var fill = parse(cs.fill);
+        if (fill && fill[3] > 0.2) {
+          var fl = rgbToHsl(fill[0], fill[1], fill[2]);
+          if (fl[2] < 0.35) { setProp(el, 'fill', lighten(fl)); }
+        }
+      }
+
+      function walk(){
+        ensureStyle();
+        var root = document.body || document.documentElement;
+        if (!root) { return; }
+        var all = root.getElementsByTagName('*');
+        var limit = Math.min(all.length, MAX_NODES);
+        for (var i = 0; i < limit; i++) { tune(all[i]); }
+      }
+
+      function schedule(){
+        if (scheduled) { return; }
+        scheduled = true;
+        setTimeout(function(){ scheduled = false; try { walk(); } catch (err) {} }, 180);
+      }
+
       function dbg(msg){ try { window.webkit.messageHandlers.seeDebugLog.postMessage(msg); } catch (err) {} }
-      function run(){
-        try { apply(); } catch (err) { dbg('dark error ' + err); }
+      try { walk(); } catch (err) { dbg('dark error ' + err); }
+      setTimeout(walk, 400);
+      setTimeout(walk, 1400);
+      setTimeout(walk, 3000);
+      if (!window.__seeDarkObserver) {
+        window.__seeDarkObserver = new MutationObserver(function(){
+          for (var i = 0; i < window.__seeDarkObserver.takeRecords().length; i++) {}
+          schedule();
+        });
+        window.__seeDarkObserver.observe(document.documentElement,
+          { childList: true, subtree: true, characterData: false });
       }
-      run();
-      setTimeout(run, 350);
-      setTimeout(run, 1200);
-      setTimeout(run, 2600);
+    })();
+    """
+
+    /// Reverts every inline style the dark mode wrote, so turning it off is exact.
+    static let darkModeOff = """
+    (function(){
+      if (window.__seeDarkObserver) { window.__seeDarkObserver.disconnect(); window.__seeDarkObserver = null; }
+      var store = window.__seeDarkStore;
+      if (store) {
+        store.forEach(function(props, el){
+          if (!el || !el.style) { return; }
+          Object.keys(props).forEach(function(prop){
+            if (props[prop]) { el.style.setProperty(prop, props[prop]); }
+            else { el.style.removeProperty(prop); }
+          });
+        });
+        store.clear();
+      }
+      window.__seeDarkStore = null;
+      var style = document.getElementById('__see_dark');
+      if (style) { style.textContent = ''; }
+      document.documentElement.style.removeProperty('color-scheme');
+      document.documentElement.style.removeProperty('background');
     })();
     """
 
@@ -833,6 +1000,7 @@ private enum PageScripts {
         + 'background:rgba(255,69,58,0.16);border-radius:6px;transition:all .07s ease-out;'
         + 'box-shadow:0 0 0 1px rgba(0,0,0,0.35),0 8px 30px rgba(255,69,58,0.28);display:none;';
       var label = document.createElement('div');
+      label.id = '__see_zap_label';
       label.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483647;'
         + 'font:600 11px -apple-system,BlinkMacSystemFont,sans-serif;color:#fff;'
         + 'background:#ff453a;padding:3px 8px;border-radius:6px;letter-spacing:.2px;'
@@ -1017,6 +1185,38 @@ private enum PageScripts {
     })();
     """
 
+    /// Reports the page's own cursor for a point, so links and buttons inside a
+    /// surface can show a hand even though the web view never gets mouse-moved
+    /// events while See's panel is not the key window.
+    static let cursorProbe = """
+    (function(){
+      window.__seeCursorAt = function(x, y){
+        var name = 'default';
+        var el = document.elementFromPoint(x, y);
+        var depth = 0;
+        while (el && el.nodeType === 1 && depth < 12) {
+          var tag = el.tagName;
+          if (tag === 'A' && el.getAttribute('href')) { name = 'pointer'; break; }
+          if (tag === 'BUTTON' || tag === 'SUMMARY') { name = 'pointer'; break; }
+          if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+            var type = (el.getAttribute('type') || '').toLowerCase();
+            name = (type === 'checkbox' || type === 'radio' || type === 'button' || type === 'submit') ? 'pointer' : 'text';
+            break;
+          }
+          var role = el.getAttribute && el.getAttribute('role');
+          if (role === 'button' || role === 'link' || role === 'tab' || role === 'menuitem' || role === 'option') { name = 'pointer'; break; }
+          if (el.isContentEditable) { name = 'text'; break; }
+          var value = '';
+          try { value = getComputedStyle(el).cursor || ''; } catch (err) { value = ''; }
+          if (value && value !== 'auto' && value !== 'default' && value !== 'inherit') { name = value; break; }
+          el = el.parentElement; depth++;
+        }
+        try { window.webkit.messageHandlers.seeCursor.postMessage(name); } catch (err) {}
+        return name;
+      };
+    })();
+    """
+
     static let stopPicker = """
     (function(){
       window.__seePickerActive = false;
@@ -1024,8 +1224,11 @@ private enum PageScripts {
       if (window.__seePickerClick) { document.removeEventListener('click', window.__seePickerClick, true); }
       if (window.__seePickerKey) { document.removeEventListener('keydown', window.__seePickerKey, true); }
       document.documentElement.style.cursor = '';
-      var box = document.getElementById('__see_zap_box');
-      if (box) { box.remove(); }
+      ['__see_zap_box', '__see_zap_label'].forEach(function(id){
+        var el = document.getElementById(id);
+        if (el) { el.style.display = 'none'; el.remove(); }
+      });
+      window.__seePickerTarget = null;
       window.__seePickerActive = false;
     })();
     """
@@ -1044,6 +1247,8 @@ private final class SeeWebBridge: NSObject, WKScriptMessageHandler {
             if let selector = message.body as? String { onPick?(selector) }
         case "seeDebugLog":
             if let text = message.body as? String { debugLog("picker: \(text)") }
+        case "seeCursor":
+            if let name = message.body as? String { site?.pageCursor = name }
         case "seeScroll":
             if let value = message.body as? Double { site?.scrollY = value }
             else if let value = message.body as? NSNumber { site?.scrollY = value.doubleValue }
@@ -1098,6 +1303,9 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     @Published var config: WebsiteConfig
     @Published var scrollY: Double = 0
     @Published var isPickingElements = false
+    /// Cursor the page itself wants at the last probed point (`pointer`, `text`…).
+    @Published var pageCursor: String = "default"
+
     /// Still image shown in place of the live page while a See panel is open.
     @Published var chromeSnapshot: NSImage?
     weak var webView: WKWebView?
@@ -1166,7 +1374,7 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         if config.darkMode {
             webView.evaluateJavaScript(PageScripts.darkMode, completionHandler: nil)
         } else {
-            webView.evaluateJavaScript("(function(){var s=document.getElementById('__see_dark');if(s){s.textContent=\"\";}document.documentElement.style.removeProperty('color-scheme');})();", completionHandler: nil)
+            webView.evaluateJavaScript(PageScripts.darkModeOff, completionHandler: nil)
         }
         webView.customUserAgent = config.userAgent.string
         webView.appearance = config.darkMode ? NSAppearance(named: .darkAqua) : nil
@@ -1197,6 +1405,8 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         }
         controller.addUserScript(WKUserScript(source: PageScripts.scrollReporter,
                                               injectionTime: .atDocumentEnd, forMainFrameOnly: false))
+        controller.addUserScript(WKUserScript(source: PageScripts.cursorProbe,
+                                              injectionTime: .atDocumentEnd, forMainFrameOnly: false))
         if isPickingElements {
             controller.addUserScript(WKUserScript(source: PageScripts.picker,
                                                   injectionTime: .atDocumentEnd, forMainFrameOnly: false))
@@ -1213,7 +1423,10 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     }
 
     func setPicking(_ picking: Bool) {
-        guard picking != isPickingElements else { return }
+        guard picking != isPickingElements else {
+            if !picking { webView?.evaluateJavaScript(PageScripts.stopPicker, completionHandler: nil) }
+            return
+        }
         isPickingElements = picking
         debugLog("setPicking \(picking) hidden=\(String(describing: webView?.isHidden))")
         guard let webView else { return }
@@ -1241,6 +1454,21 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         let x = Int(point.x.rounded()), y = Int(point.y.rounded())
         guard x >= 0, y >= 0, x <= Int(size.width), y <= Int(size.height) else { return }
         webView.evaluateJavaScript("window.__seeHoverAt && window.__seeHoverAt(\(x), \(y));", completionHandler: nil)
+    }
+
+    /// Asks the page what cursor it wants at a point (throttled).
+    private var lastProbeAt = CFAbsoluteTimeGetCurrent()
+    private var lastProbePoint = CGPoint(x: -100, y: -100)
+
+    func probeCursor(at point: CGPoint) {
+        guard let webView else { return }
+        let now = CFAbsoluteTimeGetCurrent()
+        let moved = hypot(point.x - lastProbePoint.x, point.y - lastProbePoint.y)
+        guard moved > 2 || now - lastProbeAt > 0.4 else { return }
+        lastProbeAt = now; lastProbePoint = point
+        let x = Int(point.x.rounded()), y = Int(point.y.rounded())
+        guard x >= 0, y >= 0, x <= Int(size.width), y <= Int(size.height) else { return }
+        webView.evaluateJavaScript("window.__seeCursorAt && window.__seeCursorAt(\(x), \(y));", completionHandler: nil)
     }
 
     func addHiddenSelector(_ selector: String) {
@@ -1355,6 +1583,7 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate {
         controller.add(handler, name: "seePicked")
         controller.add(handler, name: "seeScroll")
         controller.add(handler, name: "seeDebugLog")
+        controller.add(handler, name: "seeCursor")
         configuration.userContentController = controller
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init(frame: .zero)
@@ -1531,7 +1760,7 @@ private enum SurfaceHandleKind: Equatable { case move, resize }
 private enum SurfaceCursorZone: Equatable { case close, move, resize }
 
 @MainActor
-private final class CursorZoneState { static var zone: SurfaceCursorZone? }
+private final class CursorZoneState { static var key: String = "" }
 
 /// Handle hit zones in screen coordinates, matching the surface's control layout.
 private func surfaceCursorZone(_ p: CGPoint, _ rect: CGRect, close: Bool) -> SurfaceCursorZone? {
@@ -1608,6 +1837,7 @@ private struct SeeOverlay: View {
 
     private let white = Color.white
     private let dim = Color.white.opacity(0.58)
+    @StateObject private var menuSizes = MenuSizes()
     @StateObject private var anim = PeekAnimationState()
     @StateObject private var pointer = PointerWatch()
     private var appeared: Bool { anim.appeared }
@@ -1781,31 +2011,63 @@ private struct SeeOverlay: View {
     private func updateCursor(at p: CGPoint) {
         let menuOpen = model.contextMenuPoint != nil || model.surfaceMenu != nil
             || model.configuring != nil || model.showingWidgetPicker
+        guard !menuOpen, model.websites.allSatisfy({ !$0.isPickingElements }) else {
+            setCursor(zone: nil, page: "default")
+            return
+        }
+
         var zone: SurfaceCursorZone?
-        if !menuOpen && model.websites.allSatisfy({ !$0.isPickingElements }) {
-            for site in model.websites {
-                let rect = CGRect(x: site.center.x - site.size.width / 2,
-                                  y: site.center.y - site.size.height / 2,
-                                  width: site.size.width, height: site.size.height)
-                if rect.contains(p) { zone = surfaceCursorZone(p, rect, close: true); break }
-            }
-            if zone == nil {
-                for widget in model.widgets {
-                    let rect = CGRect(x: widget.center.x - widget.size.width / 2,
-                                      y: widget.center.y - widget.size.height / 2,
-                                      width: widget.size.width, height: widget.size.height)
-                    if rect.contains(p) { zone = surfaceCursorZone(p, rect, close: false); break }
-                }
+        var siteUnderPointer: WebsiteSurface?
+        var siteLocal = CGPoint.zero
+        for site in model.websites {
+            let rect = CGRect(x: site.center.x - site.size.width / 2,
+                              y: site.center.y - site.size.height / 2,
+                              width: site.size.width, height: site.size.height)
+            if rect.contains(p) {
+                zone = surfaceCursorZone(p, rect, close: true)
+                siteUnderPointer = site
+                siteLocal = CGPoint(x: p.x - rect.minX, y: p.y - rect.minY)
+                break
             }
         }
-        guard zone != CursorZoneState.zone else { return }
-        CursorZoneState.zone = zone
-        debugLog("cursor zone -> \(String(describing: zone))")
+        if zone == nil && siteUnderPointer == nil {
+            for widget in model.widgets {
+                let rect = CGRect(x: widget.center.x - widget.size.width / 2,
+                                  y: widget.center.y - widget.size.height / 2,
+                                  width: widget.size.width, height: widget.size.height)
+                if rect.contains(p) { zone = surfaceCursorZone(p, rect, close: false); break }
+            }
+        }
+        // A handle wins over the page; otherwise the page decides (links, text,
+        // draggable elements), which is what makes browsing feel native.
+        if let site = siteUnderPointer, zone == nil {
+            site.probeCursor(at: siteLocal)
+        }
+        setCursor(zone: zone, page: zone == nil ? (siteUnderPointer?.pageCursor ?? "default") : "default")
+    }
+
+    private func setCursor(zone: SurfaceCursorZone?, page: String) {
+        let key = "\(zone.map(String.init(describing:)) ?? "-")|\(page)"
+        guard key != CursorZoneState.key else { return }
+        CursorZoneState.key = key
+        debugLog("cursor \(key)")
         switch zone {
-        case .close: NSCursor.pointingHand.set()
-        case .move: NSCursor.openHand.set()
-        case .resize: seeResizeCursor().set()
-        case nil: NSCursor.arrow.set()
+        case .close: NSCursor.pointingHand.set(); return
+        case .move: NSCursor.openHand.set(); return
+        case .resize: seeResizeCursor().set(); return
+        case nil: break
+        }
+        switch page {
+        case "pointer", "hand": NSCursor.pointingHand.set()
+        case "text", "vertical-text": NSCursor.iBeam.set()
+        case "crosshair", "cell": NSCursor.crosshair.set()
+        case "grab": NSCursor.openHand.set()
+        case "grabbing", "move", "all-scroll": NSCursor.closedHand.set()
+        case "col-resize", "e-resize", "w-resize", "ew-resize": NSCursor.resizeLeftRight.set()
+        case "row-resize", "n-resize", "s-resize", "ns-resize": NSCursor.resizeUpDown.set()
+        case "not-allowed", "no-drop": NSCursor.operationNotAllowed.set()
+        case "help": NSCursor.contextualMenu.set()
+        default: NSCursor.arrow.set()
         }
     }
 
@@ -1841,21 +2103,6 @@ private struct SeeOverlay: View {
 
     // MARK: Helpers
 
-    private func openApplication(_ bundleID: String) {
-        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return }
-        let config = NSWorkspace.OpenConfiguration()
-        config.activates = true
-        withAnimation(.easeOut(duration: 0.18)) { model.showingWidgetPicker = false }
-        NSApp.deactivate()
-        hideSeeWindow()
-        NSWorkspace.shared.openApplication(at: url, configuration: config) { app, error in
-            guard let app else { debugLog("open app failed \(String(describing: error))"); return }
-            Task { @MainActor in
-                app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-            }
-        }
-    }
-
     private func hideSeeWindow() {
         onClose()
     }
@@ -1874,12 +2121,12 @@ private struct SeeOverlay: View {
 
     private func activeMenuFrame(in size: CGSize) -> CGRect? {
         if let pt = model.contextMenuPoint {
-            let o = menuOrigin(for: pt, size: size, menu: MenuMetrics.workspace)
+            let o = menuOrigin(for: pt, size: size, menu: menuSizes.workspace)
             return CGRect(origin: o, size: MenuMetrics.workspace)
         }
         if let menu = model.surfaceMenu {
-            let o = menuOrigin(for: menu.point, size: size, menu: MenuMetrics.surface)
-            return CGRect(origin: o, size: MenuMetrics.surface)
+            let o = menuOrigin(for: menu.point, size: size, menu: menuSizes.surface)
+            return CGRect(origin: o, size: menuSizes.surface)
         }
         return nil
     }
@@ -2370,17 +2617,9 @@ private struct WidgetPickerOverlay: View {
     @Binding var search: String
     let onClose: () -> Void
     let onAddWebsite: (String) -> Void
-    let onOpenApp: (String) -> Void
     let onAddWidget: (NativeWidgetKind) -> Void
 
     @FocusState private var searchFocused: Bool
-
-    private let apps: [SelectableApp] = [
-        SelectableApp(name: "Calendar", symbol: "calendar", bundleID: "com.apple.iCal"),
-        SelectableApp(name: "Notes", symbol: "note.text", bundleID: "com.apple.Notes"),
-        SelectableApp(name: "Music", symbol: "music.note", bundleID: "com.apple.Music"),
-        SelectableApp(name: "Maps", symbol: "map", bundleID: "com.apple.Maps")
-    ]
 
     var body: some View {
         ZStack {
@@ -2426,7 +2665,6 @@ private struct WidgetPickerOverlay: View {
                         switch category {
                         case .websites: websiteContent
                         case .widgets: widgetContent
-                        case .apps: appContent
                         }
                     }
                     .padding(.horizontal, 18).padding(.bottom, 18)
@@ -2488,28 +2726,6 @@ private struct WidgetPickerOverlay: View {
                     .overlay(RoundedRectangle(cornerRadius: 13).stroke(.white.opacity(0.09), lineWidth: 1))
                 }.buttonStyle(.plain)
             }
-        }
-    }
-
-    private var appContent: some View {
-        VStack(spacing: 2) {
-            ForEach(apps) { app in
-                Button {
-                    onOpenApp(app.bundleID)
-                } label: {
-                    HStack(spacing: 11) {
-                        Image(systemName: app.symbol).font(.system(size: 15)).foregroundStyle(.white.opacity(0.84)).frame(width: 24)
-                        Text(app.name).font(.system(size: 13, weight: .medium)).foregroundStyle(.white.opacity(0.88))
-                        Spacer()
-                        Text("Open app").font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(0.55))
-                    }.padding(.vertical, 8).contentShape(Rectangle())
-                }.buttonStyle(.plain)
-            }
-            Text("Apps open in their own window. See steps aside so you can use them.")
-                .font(.system(size: 11))
-                .foregroundStyle(.white.opacity(0.40))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.top, 14)
         }
     }
 
@@ -2619,12 +2835,14 @@ private struct SurfaceContextMenu: View {
                 .padding(.horizontal, 9).padding(.top, 5).padding(.bottom, 4)
 
             if isWebsite {
-                row("Configure Widget…", "slider.horizontal.3", onConfigure)
+                row("Configure Website…", "slider.horizontal.3", onConfigure)
                 row("Reload", "arrow.clockwise", onReload)
                 row("Open in Browser", "safari", onOpenInBrowser)
                 sep
+                row("Remove Website", "trash", onRemove, destructive: true)
+            } else {
+                row("Remove Widget", "trash", onRemove, destructive: true)
             }
-            row("Remove Widget", "trash", onRemove, destructive: true)
         }
         .padding(6).frame(width: 232)
         .background(GlassMenuBackground())
@@ -2851,6 +3069,7 @@ private struct ConfigureWidgetOverlay: View {
 private struct ChromeOverlay: View {
     @ObservedObject var model: OverlayModel
     let onCloseOverlay: () -> Void
+    @StateObject private var menuSizes = MenuSizes()
 
     var body: some View {
         GeometryReader { geo in
@@ -2867,7 +3086,6 @@ private struct ChromeOverlay: View {
                             }
                         },
                         onAddWebsite: { model.addWebsiteFromPicker($0, in: size, rect: model.pendingPickerForRect) },
-                        onOpenApp: { openApplication($0) },
                         onAddWidget: { model.addNativeWidget($0, in: size, rect: model.pendingPickerForRect) }
                     )
                     .frame(width: size.width, height: size.height)
@@ -2881,7 +3099,8 @@ private struct ChromeOverlay: View {
                         onSettings: { withAnimation { model.contextMenuPoint = nil; model.workspacePanel = .settings } },
                         onRemoveAll: { withAnimation { model.contextMenuPoint = nil; model.confirmingRemoveAll = true } }
                     )
-                    .position(menuCenter(for: pt, size: size, menu: MenuMetrics.workspace))
+                    .modifier(MenuSizeReader { menuSizes.workspace = $0 })
+                    .position(menuCenter(for: pt, size: size, menu: menuSizes.workspace))
                     .zIndex(10)
                 }
 
@@ -2914,7 +3133,8 @@ private struct ChromeOverlay: View {
                             withAnimation { model.surfaceMenu = nil }
                         }
                     )
-                    .position(menuCenter(for: menu.point, size: size, menu: MenuMetrics.surface))
+                    .modifier(MenuSizeReader { menuSizes.surface = $0 })
+                    .position(menuCenter(for: menu.point, size: size, menu: menuSizes.surface))
                     .zIndex(12)
                 }
 
@@ -2986,21 +3206,6 @@ private struct ChromeOverlay: View {
             withAnimation(.easeOut(duration: 0.18)) { model.workspacePanel = nil }
         } else {
             onCloseOverlay()
-        }
-    }
-
-    private func openApplication(_ bundleID: String) {
-        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return }
-        let config = NSWorkspace.OpenConfiguration()
-        config.activates = true
-        withAnimation(.easeOut(duration: 0.18)) { model.showingWidgetPicker = false }
-        NSApp.deactivate()
-        onCloseOverlay()
-        NSWorkspace.shared.openApplication(at: url, configuration: config) { app, error in
-            guard let app else { debugLog("open app failed \(String(describing: error))"); return }
-            Task { @MainActor in
-                app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-            }
         }
     }
 
