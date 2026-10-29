@@ -99,6 +99,7 @@ private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
 
     private func hidePanel() {
         guard let panel, panel.isVisible else { return }
+        model.pinned = false
         for site in model.websites { site.setPicking(false) }
         PointerPump.site?.clearHover()
         NotificationCenter.default.post(name: .seePeekClosed, object: nil)
@@ -126,8 +127,6 @@ private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
     private var fnLocal: Any?
     private var fnHeld = false
     private var openedByFn = false
-    private var fnPinned = false
-    private var lastFnRelease = Date.distantPast
 
     /// Hold Fn anywhere to peek; release it and See disappears. The menu bar eye
     /// still works for a click-to-open peek.
@@ -149,35 +148,24 @@ private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
     private func functionKeyChanged(_ down: Bool) {
         guard down != fnHeld else { return }
         fnHeld = down
-        let now = Date()
+        FnState.held = down
 
         if down {
-            // A quick second tap pins the peek open instead of being hold-to-peek.
-            if now.timeIntervalSince(lastFnRelease) < 0.45 {
-                fnPinned.toggle()
-                debugLog("fn double tap -> pinned=\(fnPinned)")
-                if fnPinned {
-                    openedByFn = false
-                    if panel?.isVisible != true { showPanel() }
-                } else {
-                    openedByFn = false
-                    hidePanel()
-                }
-                return
-            }
-            openedByFn = !fnPinned
+            openedByFn = true
             if panel?.isVisible != true {
                 debugLog("fn held -> peek")
                 showPanel()
             }
-        } else {
-            lastFnRelease = now
-            if fnPinned { return }
-            if openedByFn {
-                openedByFn = false
-                debugLog("fn released -> hide")
-                hidePanel()
+        } else if openedByFn {
+            openedByFn = false
+            // Clicking anywhere in the peek (or the pin button) keeps it open;
+            // releasing Fn only dismisses an untouched peek.
+            guard !model.pinned else {
+                debugLog("fn released -> stays (pinned)")
+                return
             }
+            debugLog("fn released -> hide")
+            hidePanel()
         }
     }
 
@@ -376,6 +364,8 @@ private final class OverlayModel: ObservableObject {
     @Published var contextMenuPoint: CGPoint? {
         didSet { if contextMenuPoint == nil { MenuHover.shared.clear("ws:") } }
     }
+    /// When true the peek stays open after Fn is released.
+    @Published var pinned = false
     @Published var showingWidgetPicker = false
     @Published var pendingPickerForRect: CGRect? = nil   // for drag-to-create
     @Published var pickerCategory: WidgetPickerCategory = .websites
@@ -2323,6 +2313,9 @@ private final class PointerPump {
 }
 
 @MainActor
+private final class FnState { static var held = false }
+
+@MainActor
 private final class CursorZoneState {
     static var key: String = ""
     static var applied: NSCursor?
@@ -2500,6 +2493,7 @@ private struct SeeOverlay: View {
                         }
                     },
                     onDismiss: { point in
+                        if FnState.held { model.pinned = true }
                         withAnimation(.easeOut(duration: 0.16)) {
                             model.contextMenuPoint = nil; model.surfaceMenu = nil
                         }
@@ -2777,6 +2771,20 @@ private struct SeeOverlay: View {
                     Text("\(count) \(count == 1 ? "surface" : "surfaces")")
                         .font(.system(size: 11, weight: .regular)).foregroundStyle(.tertiary)
                 }
+                Button {
+                    model.pinned.toggle()
+                } label: {
+                    Image(systemName: model.pinned ? "pin.fill" : "pin")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(model.pinned ? Color.accentColor : Color.white.opacity(0.85))
+                        .frame(width: 32, height: 32)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .overlay(Circle().strokeBorder(.white.opacity(0.09), lineWidth: 0.5))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help(model.pinned ? "Unpin — release Fn to close" : "Pin — keep open after Fn is released")
+
                 Button {
                     debugLog("topBar add pressed")
                     withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
