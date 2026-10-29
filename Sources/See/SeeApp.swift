@@ -87,6 +87,7 @@ private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             panel.animator().alphaValue = 1
         }
+        startFunctionKeyWatch()
         if escapeMonitor == nil {
             escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                 guard event.keyCode == 53 else { return event }
@@ -121,6 +122,42 @@ private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private var previousApp: NSRunningApplication?
+    private var fnGlobal: Any?
+    private var fnLocal: Any?
+    private var fnHeld = false
+    private var openedByFn = false
+
+    /// Hold Fn anywhere to peek; release it and See disappears. The menu bar eye
+    /// still works for a click-to-open peek.
+    private func startFunctionKeyWatch() {
+        guard fnGlobal == nil else { return }
+        let handle: (NSEvent) -> Void = { [weak self] event in
+            guard let self else { return }
+            let down = event.modifierFlags.contains(.function)
+            Task { @MainActor in self.functionKeyChanged(down) }
+        }
+        fnGlobal = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged, handler: handle)
+        fnLocal = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
+            handle(event)
+            return event
+        }
+    }
+
+    @MainActor
+    private func functionKeyChanged(_ down: Bool) {
+        guard down != fnHeld else { return }
+        fnHeld = down
+        if down {
+            guard panel?.isVisible != true else { return }
+            openedByFn = true
+            debugLog("fn held -> peek")
+            showPanel()
+        } else if openedByFn {
+            openedByFn = false
+            debugLog("fn released -> hide")
+            hidePanel()
+        }
+    }
 
     private func makePanel() -> SeeOverlayPanel {
         let frame = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
@@ -2858,6 +2895,9 @@ private struct BehindWindowGlass: NSViewRepresentable {
         view.blendingMode = .behindWindow
         view.state = .active
         view.isEmphasized = false
+        // The material itself carries a tint; easing its alpha lets more of the
+        // untouched background through.
+        view.alphaValue = 0.62
         let dark = NSView()
         dark.wantsLayer = true
         dark.layer?.backgroundColor = NSColor.black.withAlphaComponent(scrim).cgColor
@@ -3017,8 +3057,7 @@ private struct NativeWidgetView: View {
                     BehindWindowGlass()
                         .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                 }
-                .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
+
                 .compositingGroup()
                 .shadow(color: .black.opacity(widget.isDragging ? 0.22 : 0.28),
                         radius: widget.isDragging ? 18 : 32, y: widget.isDragging ? 8 : 16)
