@@ -1,5 +1,8 @@
 import AppKit
 import QuartzCore
+import AVFoundation
+import CoreMedia
+import ScreenCaptureKit
 import Combine
 import SwiftUI
 import WebKit
@@ -277,6 +280,7 @@ private struct SurfaceMenuTarget: Identifiable {
     let id = UUID()
     let site: WebsiteSurface?
     let widget: NativeWidgetSurface?
+    var app: AppMirrorSurface? = nil
     let point: CGPoint
 }
 
@@ -284,6 +288,7 @@ private struct SurfaceMenuTarget: Identifiable {
 private final class OverlayModel: ObservableObject {
     @Published var websites: [WebsiteSurface] = []
     @Published var widgets: [NativeWidgetSurface] = []
+    @Published var apps: [AppMirrorSurface] = []
     @Published var focusedID: UUID?
     @Published var hasPlacedInitialSite = false
     @Published var contextMenuPoint: CGPoint?
@@ -316,6 +321,9 @@ private final class OverlayModel: ObservableObject {
     func snapshot() -> WorkspaceSnapshot {
         WorkspaceSnapshot(websites: websites.map(\.snapshot),
                           widgets: widgets.map(\.snapshot),
+                          apps: apps.map { AppSnapshot(id: $0.id, bundleID: $0.bundleID, name: $0.appName,
+                                                       x: $0.center.x, y: $0.center.y,
+                                                       w: $0.size.width, h: $0.size.height) },
                           background: backgroundStyle.rawValue)
     }
 
@@ -333,8 +341,15 @@ private final class OverlayModel: ObservableObject {
             return NativeWidgetSurface(kind: kind, center: CGPoint(x: item.x, y: item.y), id: item.id,
                                        size: CGSize(width: item.w, height: item.h), note: item.note)
         }
-        if !websites.isEmpty || !widgets.isEmpty { hasPlacedInitialSite = true }
-        debugLog("restored \(websites.count) sites, \(widgets.count) widgets")
+        apps = (saved.apps ?? []).map { item in
+            let surface = AppMirrorSurface(bundleID: item.bundleID, appName: item.name,
+                                           center: CGPoint(x: item.x, y: item.y), id: item.id,
+                                           size: CGSize(width: item.w, height: item.h))
+            return surface
+        }
+        for surface in apps { surface.start() }
+        if !websites.isEmpty || !widgets.isEmpty || !apps.isEmpty { hasPlacedInitialSite = true }
+        debugLog("restored \(websites.count) sites, \(widgets.count) widgets, \(apps.count) apps")
     }
 
     private func startAutosave() {
@@ -377,7 +392,9 @@ private final class OverlayModel: ObservableObject {
 
     func openSurfaceMenu(at point: CGPoint) {
         debugLog("openSurfaceMenu at \(point) site=\(website(at: point) != nil) widget=\(widget(at: point) != nil)")
-        if let site = website(at: point) {
+        if let app = app(at: point) {
+            surfaceMenu = SurfaceMenuTarget(site: nil, widget: nil, app: app, point: point)
+        } else if let site = website(at: point) {
             surfaceMenu = SurfaceMenuTarget(site: site, widget: nil, point: point)
         } else if let widget = widget(at: point) {
             surfaceMenu = SurfaceMenuTarget(site: nil, widget: widget, point: point)
@@ -458,6 +475,31 @@ private final class OverlayModel: ObservableObject {
     func addWidget(_ kind: NativeWidgetKind, center: CGPoint) {
         let widget = NativeWidgetSurface(kind: kind, center: center)
         withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) { widgets.append(widget) }
+    }
+
+    func addApp(_ bundleID: String, name: String, in size: CGSize, rect: CGRect? = nil) {
+        if apps.contains(where: { $0.bundleID == bundleID }) {
+            if let existing = apps.first(where: { $0.bundleID == bundleID }) { focusedID = existing.id }
+            return
+        }
+        let surfaceSize = rect.map { CGSize(width: max(420, $0.width), height: max(300, $0.height)) }
+            ?? CGSize(width: min(720, size.width * 0.5), height: min(520, size.height * 0.56))
+        let center = rect.map { CGPoint(x: $0.midX, y: $0.midY) } ?? emptyCenter(for: surfaceSize, in: size)
+        let surface = AppMirrorSurface(bundleID: bundleID, appName: name, center: center, size: surfaceSize)
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) { apps.append(surface) }
+        surface.start()
+    }
+
+    func removeApp(_ surface: AppMirrorSurface) {
+        surface.stop()
+        withAnimation(.easeInOut(duration: 0.22)) { apps.removeAll { $0.id == surface.id } }
+    }
+
+    func app(at point: CGPoint) -> AppMirrorSurface? {
+        apps.last { surface in
+            CGRect(x: surface.center.x - surface.size.width / 2, y: surface.center.y - surface.size.height / 2,
+                   width: surface.size.width, height: surface.size.height).contains(point)
+        }
     }
 
     func removeWidget(_ widget: NativeWidgetSurface) {
@@ -636,6 +678,13 @@ private struct WebsiteSnapshot: Codable {
     var scrollY: Double
 }
 
+private struct AppSnapshot: Codable {
+    var id: UUID
+    var bundleID: String
+    var name: String
+    var x: Double, y: Double, w: Double, h: Double
+}
+
 private struct WidgetSnapshot: Codable {
     var id: UUID
     var kind: String
@@ -647,6 +696,7 @@ private struct WorkspaceSnapshot: Codable {
     var version = 1
     var websites: [WebsiteSnapshot] = []
     var widgets: [WidgetSnapshot] = []
+    var apps: [AppSnapshot]? = []
     var background: String = WorkspaceBackgroundStyle.midnight.rawValue
 }
 
@@ -918,6 +968,313 @@ private final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
     init(_ target: SeeWebBridge) { self.target = target }
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
         target?.userContentController(controller, didReceive: message)
+    }
+}
+
+
+// MARK: - App mirrors
+// A real app lives inside the workspace: its window content is streamed with
+// ScreenCaptureKit and mouse input is forwarded back to the owning process, so
+// the app is usable without ever leaving the peek.
+
+@MainActor
+private final class AppMirrorSurface: ObservableObject, Identifiable {
+    let id: UUID
+    let bundleID: String
+    let appName: String
+    @Published var center: CGPoint
+    @Published var size: CGSize
+    @Published var status: MirrorStatus = .starting
+    @Published var isDragging = false
+    @Published var windowFrame: CGRect = .zero      // screen points, top-left origin
+    @Published var pid: pid_t = 0
+    var icon: NSImage?
+
+    let controller = AppMirrorController()
+
+    init(bundleID: String, appName: String, center: CGPoint, id: UUID = UUID(), size: CGSize? = nil) {
+        self.id = id
+        self.bundleID = bundleID
+        self.appName = appName
+        self.center = center
+        self.size = size ?? CGSize(width: 620, height: 420)
+        icon = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
+            .map { NSWorkspace.shared.icon(forFile: $0.path) }
+        controller.surface = self
+    }
+
+    func start() {
+        status = .starting
+        Task { await controller.start(bundleID: bundleID, size: size) }
+    }
+
+    func stop() { controller.stop() }
+
+    func updateWindowFrame() {
+        guard let info = AppWindows.window(for: pid) else { return }
+        windowFrame = info
+    }
+
+    func forward(_ event: NSEvent) {}
+}
+
+private enum MirrorStatus: Equatable {
+    case starting
+    case live
+    case needsPermission
+    case failed(String)
+
+    var title: String {
+        switch self {
+        case .starting: "Connecting…"
+        case .live: "Live"
+        case .needsPermission: "Screen Recording needed"
+        case .failed(let message): message
+        }
+    }
+}
+
+private enum AppWindows {
+    /// The on-screen content window of a process, in screen points.
+    static func window(for pid: pid_t) -> CGRect? {
+        guard pid > 0 else { return nil }
+        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else { return nil }
+        var best: (CGRect, Int)?
+        for item in list {
+            guard let owner = item[kCGWindowOwnerPID as String] as? pid_t, owner == pid,
+                  let layer = item[kCGWindowLayer as String] as? Int, layer == 0,
+                  let boundsDict = item[kCGWindowBounds as String] as? [String: Any],
+                  let rect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else { continue }
+            if rect.width < 120 || rect.height < 80 { continue }
+            if let current = best {
+                if rect.width * rect.height > current.0.width * current.0.height { best = (rect, layer) }
+            } else {
+                best = (rect, layer)
+            }
+        }
+        return best?.0
+    }
+}
+
+private final class AppMirrorContentView: NSView {
+    let imageLayer = CALayer()
+    var onInput: ((NSEvent, CGPoint) -> Void)?
+    var onDoubleClick: (() -> Void)?
+
+    override var isFlipped: Bool { true }
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.masksToBounds = true
+        imageLayer.contentsGravity = .resizeAspect
+        imageLayer.backgroundColor = NSColor.black.cgColor
+        layer?.addSublayer(imageLayer)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        imageLayer.frame = bounds
+        CATransaction.commit()
+    }
+
+    func display(_ image: CGImage) {
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        imageLayer.contents = image
+        CATransaction.commit()
+    }
+
+    private func localPoint(_ event: NSEvent) -> CGPoint {
+        let p = convert(event.locationInWindow, from: nil)
+        return CGPoint(x: p.x / max(1, bounds.width), y: p.y / max(1, bounds.height))
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 2 { onDoubleClick?(); return }
+        onInput?(event, localPoint(event))
+    }
+    override func rightMouseDown(with event: NSEvent) { onInput?(event, localPoint(event)) }
+    override func otherMouseDown(with event: NSEvent) { onInput?(event, localPoint(event)) }
+    override func scrollWheel(with event: NSEvent) { onInput?(event, localPoint(event)) }
+    override func mouseDragged(with event: NSEvent) { onInput?(event, localPoint(event)) }
+    override func mouseUp(with event: NSEvent) { onInput?(event, localPoint(event)) }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+private struct AppMirrorContentViewRepresentable: NSViewRepresentable {
+    let surface: AppMirrorSurface
+
+    func makeNSView(context: Context) -> AppMirrorContentView {
+        let view = AppMirrorContentView()
+        surface.controller.view = view
+        view.onInput = { event, point in surface.controller.forward(event, in: view, at: point) }
+        view.onDoubleClick = { surface.controller.focusApp() }
+        return view
+    }
+
+    func updateNSView(_ view: AppMirrorContentView, context: Context) {
+        surface.controller.view = view
+    }
+}
+
+@MainActor
+private final class AppMirrorController: NSObject, @preconcurrency SCStreamOutput, @preconcurrency SCStreamDelegate {
+    weak var surface: AppMirrorSurface?
+    weak var view: AppMirrorContentView?
+
+    private var stream: SCStream?
+    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+    private var lastFrameTime: CFAbsoluteTime = 0
+
+    func start(bundleID: String, size: CGSize) async {
+        stop()
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
+            surface?.status = .failed("App not found")
+            return
+        }
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = false
+        let running = NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == bundleID }
+        let launched = try? await NSWorkspace.shared.openApplication(at: url, configuration: config)
+        let app = running ?? launched
+
+        guard let app else {
+            surface?.status = .failed("Could not launch app")
+            return
+        }
+        surface?.pid = app.processIdentifier
+        app.unhide()   // its window must exist on screen; See keeps the focus
+        // Give the app a moment to put a window on screen.
+        var frame: CGRect?
+        for _ in 0..<25 {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            frame = AppWindows.window(for: app.processIdentifier)
+            if frame != nil { break }
+        }
+        guard let frame else {
+            surface?.status = .failed("No window to mirror")
+            return
+        }
+        surface?.windowFrame = frame
+
+        if !CGPreflightScreenCaptureAccess() {
+            CGRequestScreenCaptureAccess()
+            surface?.status = .needsPermission
+            return
+        }
+
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            guard let window = content.windows
+                .filter({ $0.owningApplication?.bundleIdentifier == bundleID && $0.windowLayer == 0 })
+                .max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
+            else {
+                surface?.status = .failed("No window to mirror")
+                return
+            }
+            surface?.windowFrame = window.frame
+            let filter = SCContentFilter(desktopIndependentWindow: window)
+            let config = SCStreamConfiguration()
+            let scale = NSScreen.main?.backingScaleFactor ?? 2
+            config.width = Int(max(320, window.frame.width * scale))
+            config.height = Int(max(240, window.frame.height * scale))
+            config.minimumFrameInterval = CMTime(value: 1, timescale: 30)
+            config.queueDepth = 3
+            config.showsCursor = false
+            config.pixelFormat = kCVPixelFormatType_32BGRA
+
+            let stream = SCStream(filter: filter, configuration: config, delegate: self)
+            try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: .main)
+            try await stream.startCapture()
+            self.stream = stream
+            surface?.status = .live
+            debugLog("mirror live \(bundleID) \(window.frame)")
+        } catch {
+            debugLog("mirror failed \(error)")
+            surface?.status = .failed("Mirror unavailable")
+        }
+    }
+
+    func stop() {
+        let stream = self.stream
+        self.stream = nil
+        Task { try? await stream?.stopCapture() }
+    }
+
+    func focusApp() {
+        guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == surface?.bundleID }) else { return }
+        app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+    }
+
+    nonisolated func stream(_ stream: SCStream, didStopWithError error: Error) {
+        debugLog("mirror stopped \(error)")
+    }
+
+    private nonisolated static let frameContext = CIContext(options: [.useSoftwareRenderer: false])
+
+    nonisolated func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .screen, sampleBuffer.isValid else { return }
+        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
+              let statusRaw = attachments.first?[.status] as? Int,
+              let status = SCFrameStatus(rawValue: statusRaw), status == .complete else { return }
+        guard let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let image = CIImage(cvPixelBuffer: buffer)
+        guard let cgImage = Self.frameContext.createCGImage(image, from: image.extent) else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let now = CFAbsoluteTimeGetCurrent()
+            if now - self.lastFrameTime < 1.0 / 24.0 { return }
+            self.lastFrameTime = now
+            self.view?.display(cgImage)
+        }
+    }
+
+    /// Re-target a mouse event onto the mirrored window and deliver it to the app.
+    func forward(_ event: NSEvent, in view: AppMirrorContentView, at fraction: CGPoint) {
+        guard let surface, surface.pid > 0 else { return }
+        if surface.windowFrame == .zero { surface.updateWindowFrame() }
+        let frame = surface.windowFrame
+        guard frame.width > 1 else { return }
+        // Letterboxed content: map through the aspect-fit rect.
+        let videoAspect = frame.width / frame.height
+        let bounds = view.bounds
+        let fitWidth = min(bounds.width, bounds.height * videoAspect)
+        let fitHeight = fitWidth / videoAspect
+        let insetX = (bounds.width - fitWidth) / 2
+        let insetY = (bounds.height - fitHeight) / 2
+        let point = CGPoint(x: fraction.x * bounds.width - insetX, y: fraction.y * bounds.height - insetY)
+        guard point.x >= -1, point.y >= -1, point.x <= fitWidth + 1, point.y <= fitHeight + 1 else { return }
+        let screenPoint = CGPoint(x: frame.minX + point.x / fitWidth * frame.width,
+                                  y: frame.minY + point.y / fitHeight * frame.height)
+
+        let type: CGEventType
+        switch event.type {
+        case .leftMouseDown: type = .leftMouseDown
+        case .leftMouseUp: type = .leftMouseUp
+        case .leftMouseDragged: type = .leftMouseDragged
+        case .rightMouseDown: type = .rightMouseDown
+        case .rightMouseUp: type = .rightMouseUp
+        case .otherMouseDown: type = .otherMouseDown
+        case .otherMouseUp: type = .otherMouseUp
+        case .scrollWheel: type = .scrollWheel
+        default: return
+        }
+
+        if type == .scrollWheel {
+            let dy = Int32(event.scrollingDeltaY * (event.hasPreciseScrollingDeltas ? 1 : 6))
+            guard let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: dy, wheel2: 0, wheel3: 0) else { return }
+            cg.location = screenPoint
+            cg.postToPid(surface.pid)
+            return
+        }
+        let button: CGMouseButton = (type == .rightMouseDown || type == .rightMouseUp) ? .right
+            : ((type == .otherMouseDown || type == .otherMouseUp) ? .center : .left)
+        guard let cg = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: screenPoint, mouseButton: button) else { return }
+        cg.setIntegerValueField(.mouseEventClickState, value: Int64(event.clickCount))
+        cg.postToPid(surface.pid)
     }
 }
 
@@ -1410,6 +1767,196 @@ private struct PlacedWidgetView: View {
     }
 }
 
+
+// MARK: - App mirror card
+
+@MainActor
+private struct PlacedAppView: View {
+    @ObservedObject var surface: AppMirrorSurface
+    let onClose: () -> Void
+
+    var body: some View {
+        AppMirrorCard(surface: surface, onClose: onClose)
+            .position(x: surface.center.x, y: surface.center.y)
+    }
+}
+
+@MainActor
+private struct AppMirrorCard: View {
+    @ObservedObject var surface: AppMirrorSurface
+    let onClose: () -> Void
+    @StateObject private var hover = HoverState()
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            AppMirrorContentViewRepresentable(surface: surface)
+                .frame(width: surface.size.width, height: surface.size.height)
+                .background(Color.black.opacity(0.55))
+
+            if surface.status != .live {
+                statusOverlay
+                    .frame(width: surface.size.width, height: surface.size.height)
+            }
+
+            // Drag strip / title
+            HStack(spacing: 9) {
+                if let icon = surface.icon {
+                    Image(nsImage: icon).resizable().frame(width: 16, height: 16)
+                }
+                Text(surface.appName)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.86))
+                Spacer(minLength: 0)
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold)).foregroundStyle(.white.opacity(0.9))
+                        .frame(width: 20, height: 20).background(.white.opacity(0.14), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .opacity(hover.showClose ? 1 : 0)
+                .animation(.easeInOut(duration: 0.16), value: hover.showClose)
+            }
+            .padding(.horizontal, 10)
+            .frame(width: surface.size.width, height: 34)
+            .background(
+                LinearGradient(colors: [.black.opacity(0.62), .black.opacity(0.0)],
+                               startPoint: .top, endPoint: .bottom)
+            )
+            .overlay(alignment: .bottom) {
+                Capsule().fill(.white.opacity(hover.nearMove ? 0.7 : 0))
+                    .frame(width: 46, height: 4).padding(.bottom, 2)
+                    .allowsHitTesting(false)
+            }
+
+            AppCardDragHandler(surface: surface,
+                               onHoverChange: { hover.setHovering($0) },
+                               onMoveActive: { hover.nearMove = $0 },
+                               onResizeActive: { _ in })
+        }
+        .frame(width: surface.size.width, height: surface.size.height)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(.white.opacity(hover.showClose ? 0.24 : 0.12), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(surface.isDragging ? 0.3 : 0.42),
+                radius: surface.isDragging ? 18 : 32, y: surface.isDragging ? 8 : 16)
+        .transaction { tx in if surface.isDragging { tx.animation = nil } }
+    }
+
+    @ViewBuilder private var statusOverlay: some View {
+        VStack(spacing: 10) {
+            if let icon = surface.icon {
+                Image(nsImage: icon).resizable().frame(width: 44, height: 44).opacity(0.9)
+            }
+            Text(surface.status.title)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white.opacity(0.7))
+                .multilineTextAlignment(.center)
+            if surface.status == .needsPermission {
+                Button("Open System Settings") {
+                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.black.opacity(0.75))
+    }
+}
+
+private struct AppCardDragHandler: NSViewRepresentable {
+    @ObservedObject var surface: AppMirrorSurface
+    let onHoverChange: (Bool) -> Void
+    let onMoveActive: (Bool) -> Void
+    let onResizeActive: (Bool) -> Void
+
+    func makeNSView(context: Context) -> AppCardDragView {
+        let v = AppCardDragView()
+        v.surface = surface
+        v.onHoverChange = onHoverChange
+        v.onMoveActive = onMoveActive
+        v.onResizeActive = onResizeActive
+        return v
+    }
+
+    func updateNSView(_ v: AppCardDragView, context: Context) {
+        v.surface = surface
+        v.onHoverChange = onHoverChange
+        v.onMoveActive = onMoveActive
+        v.onResizeActive = onResizeActive
+    }
+}
+
+@MainActor
+private final class AppCardDragView: NSView {
+    var surface: AppMirrorSurface?
+    var onHoverChange: ((Bool) -> Void)?
+    var onMoveActive: ((Bool) -> Void)?
+    var onResizeActive: ((Bool) -> Void)?
+
+    private var dragging = false
+    private var resizing = false
+    private var dragOffset = CGPoint.zero
+    private var resizeStart = CGSize.zero
+    private var startMouse = CGPoint.zero
+
+    override var isFlipped: Bool { true }
+    init() { super.init(frame: .zero) }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func mouseEntered(with event: NSEvent) {
+        onHoverChange?(true); onMoveActive?(true)
+    }
+    override func mouseExited(with event: NSEvent) {
+        let local = convert(event.locationInWindow, from: nil)
+        guard !bounds.contains(local) else { return }
+        onHoverChange?(false); onMoveActive?(false)
+    }
+
+    private var moveRect: CGRect { CGRect(x: 0, y: 0, width: bounds.width, height: 46) }
+    private var resizeRect: CGRect { CGRect(x: bounds.width - 34, y: bounds.height - 34, width: 34, height: 34) }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        if moveRect.contains(local) || resizeRect.contains(local) { return self }
+        return nil
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let surface else { return }
+        let local = convert(event.locationInWindow, from: nil)
+        if resizeRect.contains(local) {
+            resizing = true
+            resizeStart = surface.size
+            startMouse = event.locationInWindow
+        } else if moveRect.contains(local) {
+            dragging = true
+            dragOffset = CGPoint(x: surface.center.x - event.locationInWindow.x,
+                                 y: surface.center.y - event.locationInWindow.y)
+            surface.isDragging = true
+        }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let surface else { return }
+        let p = event.locationInWindow
+        if resizing {
+            surface.size = CGSize(width: max(320, resizeStart.width + (p.x - startMouse.x)),
+                                  height: max(220, resizeStart.height + (p.y - startMouse.y)))
+        } else if dragging {
+            surface.center = CGPoint(x: p.x + dragOffset.x, y: p.y + dragOffset.y)
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        dragging = false; resizing = false
+        surface?.isDragging = false
+    }
+}
+
 // MARK: - Root overlay
 
 @MainActor
@@ -1436,6 +1983,20 @@ private struct SeeOverlay: View {
                     .scaleEffect(appeared ? 1 : 1.08)
                     .opacity(appeared ? 1 : 0)
                     .animation(.easeOut(duration: 0.55), value: appeared)
+
+                // App mirrors
+                ForEach(Array(model.apps.enumerated()), id: \.element.id) { index, surface in
+                    PlacedAppView(surface: surface, onClose: { model.removeApp(surface) })
+                        .scaleEffect(appeared ? 1 : 0.95)
+                        .opacity(appeared ? 1 : 0)
+                        .blur(radius: appeared ? 0 : 10)
+                        .animation(.spring(response: 0.55, dampingFraction: 0.86)
+                            .delay(Double(index) * 0.045), value: appeared)
+                        .zIndex(1 + Double(index))
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .scale(scale: 0.94)),
+                            removal: .opacity.combined(with: .scale(scale: 0.92))))
+                }
 
                 // Website surfaces
                 ForEach(Array(model.websites.enumerated()), id: \.element.id) { index, site in
@@ -1603,19 +2164,12 @@ private struct SeeOverlay: View {
 
     private func openApplication(_ bundleID: String) {
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return }
-        let config = NSWorkspace.OpenConfiguration()
-        config.activates = true
+        let name = NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == bundleID }?.localizedName
+            ?? url.deletingPathExtension().lastPathComponent
         withAnimation(.easeOut(duration: 0.18)) { model.showingWidgetPicker = false }
-        // Give up See's key/active state first, otherwise the launched app is
-        // opened behind the floating See panel.
-        NSApp.deactivate()
-        hideSeeWindow()
-        NSWorkspace.shared.openApplication(at: url, configuration: config) { app, error in
-            guard let app else { debugLog("open app failed \(String(describing: error))"); return }
-            Task { @MainActor in
-                app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-            }
-        }
+        let workspaceSize = NSScreen.main?.frame.size ?? CGSize(width: 1440, height: 900)
+        model.addApp(bundleID, name: name, in: workspaceSize, rect: model.pendingPickerForRect)
+        model.pendingPickerForRect = nil
     }
 
     private func hideSeeWindow() {
@@ -1651,6 +2205,10 @@ private struct SeeOverlay: View {
             let c = siteCenter(site, index: i, size: size)
             if CGRect(x: c.x - site.size.width/2, y: c.y - site.size.height/2,
                       width: site.size.width, height: site.size.height).contains(pt) { return true }
+        }
+        for surface in model.apps {
+            if CGRect(x: surface.center.x - surface.size.width/2, y: surface.center.y - surface.size.height/2,
+                      width: surface.size.width, height: surface.size.height).contains(pt) { return true }
         }
         for (i, widget) in model.widgets.enumerated() {
             let c = widgetCenter(widget, index: i, size: size)
@@ -2207,11 +2765,11 @@ private struct WidgetPickerOverlay: View {
                         Image(systemName: app.symbol).font(.system(size: 15)).foregroundStyle(.white.opacity(0.84)).frame(width: 24)
                         Text(app.name).font(.system(size: 13, weight: .medium)).foregroundStyle(.white.opacity(0.88))
                         Spacer()
-                        Text("Open app").font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(0.55))
+                        Text("Add").font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(0.55))
                     }.padding(.vertical, 8).contentShape(Rectangle())
                 }.buttonStyle(.plain)
             }
-            Text("Apps open in their own window. See steps aside so you can use them.")
+            Text("Apps appear live inside your workspace. You can click and scroll them right here.")
                 .font(.system(size: 11))
                 .foregroundStyle(.white.opacity(0.40))
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -2280,6 +2838,7 @@ private struct WorkspaceOptionsOverlay: View {
 private struct SurfaceContextMenu: View {
     let title: String
     let isWebsite: Bool
+    var isApp: Bool = false
     let onConfigure: () -> Void
     let onReload: () -> Void
     let onOpenInBrowser: () -> Void
@@ -2298,6 +2857,10 @@ private struct SurfaceContextMenu: View {
                 row("Configure Widget…", "slider.horizontal.3", onConfigure)
                 row("Reload", "arrow.clockwise", onReload)
                 row("Open in Browser", "safari", onOpenInBrowser)
+                sep
+            } else if isApp {
+                row("Refresh Mirror", "arrow.clockwise", onReload)
+                row("Open App", "arrow.up.forward.app", onOpenInBrowser)
                 sep
             }
             row("Remove Widget", "trash", onRemove, destructive: true)
@@ -2547,8 +3110,9 @@ private struct ChromeOverlay: View {
 
                 if let menu = model.surfaceMenu {
                     SurfaceContextMenu(
-                        title: menu.site?.title ?? menu.widget.map { $0.kind.rawValue } ?? "Widget",
+                        title: menu.site?.title ?? menu.app?.appName ?? menu.widget.map { $0.kind.rawValue } ?? "Widget",
                         isWebsite: menu.site != nil,
+                        isApp: menu.app != nil,
                         onConfigure: {
                             if let site = menu.site {
                                 withAnimation(.spring(response: 0.3, dampingFraction: 0.84)) {
@@ -2559,11 +3123,16 @@ private struct ChromeOverlay: View {
                             }
                         },
                         onReload: {
+                            if let app = menu.app { app.start() }
                             menu.site?.reload()
                             withAnimation { model.surfaceMenu = nil }
                         },
                         onOpenInBrowser: {
-                            if let site = menu.site, let url = URL(string: site.address) {
+                            if let app = menu.app {
+                                NSWorkspace.shared.runningApplications
+                                    .first { $0.bundleIdentifier == app.bundleID }?
+                                    .activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+                            } else if let site = menu.site, let url = URL(string: site.address) {
                                 NSWorkspace.shared.open(url)
                             }
                             withAnimation { model.surfaceMenu = nil }
@@ -2571,6 +3140,7 @@ private struct ChromeOverlay: View {
                         onRemove: {
                             if let site = menu.site { model.remove(site) }
                             if let widget = menu.widget { model.removeWidget(widget) }
+                            if let app = menu.app { model.removeApp(app) }
                             withAnimation { model.surfaceMenu = nil }
                         }
                     )
@@ -2649,17 +3219,12 @@ private struct ChromeOverlay: View {
 
     private func openApplication(_ bundleID: String) {
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return }
-        let config = NSWorkspace.OpenConfiguration()
-        config.activates = true
+        let name = NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == bundleID }?.localizedName
+            ?? url.deletingPathExtension().lastPathComponent
         withAnimation(.easeOut(duration: 0.18)) { model.showingWidgetPicker = false }
-        NSApp.deactivate()
-        onCloseOverlay()
-        NSWorkspace.shared.openApplication(at: url, configuration: config) { app, error in
-            guard let app else { debugLog("open app failed \(String(describing: error))"); return }
-            Task { @MainActor in
-                app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-            }
-        }
+        let workspaceSize = NSScreen.main?.frame.size ?? CGSize(width: 1440, height: 900)
+        model.addApp(bundleID, name: name, in: workspaceSize)
+        model.pendingPickerForRect = nil
     }
 
     private func menuCenter(for point: CGPoint, size: CGSize, menu: CGSize) -> CGPoint {

@@ -31,3 +31,23 @@ Websites, native widgets, their positions, sizes, background style, scroll offse
 `~/Library/Application Support/See/workspace.json` and restored on launch.
 
 See `PRODUCT.md` for the product direction and MVP milestones.
+
+## App widgets (live app windows in the workspace)
+
+Adding an app from *Add → Apps* no longer throws you out to the app's own
+window. See launches the app, streams its window with ScreenCaptureKit and
+draws it as a card inside the workspace:
+
+- **Live** — the card is a real 30 fps mirror of the app window, not a still.
+- **Interactive** — clicks, right-clicks, drags and scrolls on the card are
+  forwarded to the owning process (`CGEvent.postToPid`), mapped through the
+  mirrored window's frame, so you operate the app inside the peek.
+- **Double-click** the card to bring the app itself forward.
+- Right-click the card for *Refresh Mirror*, *Open App* and *Remove*.
+- Drag the title strip to move it, the bottom-right corner to resize; size and
+  position persist with the rest of the workspace.
+
+ScreenCaptureKit needs the **Screen Recording** permission. The first time a
+mirror starts, macOS asks for it (See also opens the right Settings pane). After
+granting it, quit and reopen See — the card switches from *Screen Recording
+needed* to the live app.
