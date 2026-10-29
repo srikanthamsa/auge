@@ -11,7 +11,7 @@ swift build
 swift run See
 ```
 
-The app launches into a full-screen dimmed workspace with a quick fade. Website surfaces show the page without browser chrome. Use **Add** to open a URL or add a Clock, Calendar, or Quick Note. Hover near the bottom center to reveal the move bar; hover at the bottom-right corner to reveal the rounded resize grip. Drag on empty space to open the Add picker for the rectangle you drew. Right-click the empty workspace for **Customize Background…** (ten palettes plus glow and dim sliders), Tidy Layout, Settings, or Remove All. Press Escape to close the topmost thing first — the picker, a menu, the background panel, or the website picker — and Escape again to dismiss See; click its menu bar eye to reopen it.
+The app launches into a full-screen dimmed workspace with a quick fade. Website surfaces show the page without browser chrome. Use **Add** to open a URL or add a Clock, Calendar, or Quick Note. Hover near the bottom center to reveal the move bar; hover at the bottom-right corner to reveal the rounded resize grip. Drag on empty space to open the Add picker for the rectangle you drew. Right-click the empty workspace for **Tidy Layout** — which packs every surface into the free space, largest first, shrinking only when it must, so nothing overlaps — **Customize Background…** (ten palettes plus glow and dim sliders), Tidy Layout, Settings, or Remove All. Press Escape to close the topmost thing first — the picker, a menu, the background panel, or the website picker — and Escape again to dismiss See; click its menu bar eye to reopen it.
 
 ## Widget configuration
 
@@ -21,6 +21,7 @@ Right-click any website widget for **Configure Widget…**:
 - **Remember Scroll Position** — restores the page's scroll offset on reload and relaunch
 - **User Agent** — Chrome (macOS), Safari (macOS), iPhone, iPad (device layouts)
 - **Hide page elements** — *Select on page…* turns the page into a picker: click any element to hide it and keep going for the next one, with a selector list, per-item remove, and Clear all. Hiding and restoring both apply immediately, no reload.
+- **Page hover and cursors** — links, buttons, form fields and `:hover` highlights inside a surface behave as they do in a browser: See replays the pointer into the page and maps the page's own cursor
 - **Dark mode (experimental)** — asks the page for a dark color scheme, then walks the DOM and darkens only the light surfaces and lightens only the dark text, keeping every hue where it was. Photos, video and artwork are never inverted
 
 The same menu can reload the page, open it in your browser, or remove the widget.

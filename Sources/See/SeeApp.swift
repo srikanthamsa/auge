@@ -74,8 +74,13 @@ private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
         if let screen = NSScreen.main { panel.setFrame(screen.frame, display: true) }
         panel.alphaValue = 0
         panel.makeKeyAndOrderFront(nil)
+        panel.makeMain()
         NSApp.activate(ignoringOtherApps: true)
         NotificationCenter.default.post(name: .seePeekOpened, object: nil)
+        if previousApp == nil { previousApp = NSWorkspace.shared.frontmostApplication }
+        NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+        }
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.10
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
@@ -92,6 +97,7 @@ private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
 
     private func hidePanel() {
         guard let panel, panel.isVisible else { return }
+        for site in model.websites { site.setPicking(false) }
         NotificationCenter.default.post(name: .seePeekClosed, object: nil)
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.09
@@ -101,14 +107,22 @@ private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in
                 panel.orderOut(nil)
                 panel.alphaValue = 1
+                // Hand focus back to whatever the peek covered.
+                if NSWorkspace.shared.frontmostApplication?.processIdentifier != getpid() {
+                    self.previousApp = nil
+                } else if let previous = self.previousApp, previous.processIdentifier != getpid() {
+                    previous.activate(options: [])
+                    self.previousApp = nil
+                }
             }
         })
     }
 
+    private var previousApp: NSRunningApplication?
+
     private func makePanel() -> SeeOverlayPanel {
         let frame = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let panel = SeeOverlayPanel(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
-        panel.isFloatingPanel = true
         panel.level = .screenSaver
         panel.isOpaque = false
         panel.backgroundColor = .clear
@@ -479,40 +493,121 @@ private final class OverlayModel: ObservableObject {
         withAnimation(.easeInOut(duration: 0.22)) { widgets.removeAll { $0.id == widget.id } }
     }
 
+    /// Packs every surface into the free workspace without overlaps: large
+    /// surfaces claim space first, each one takes the tightest free rectangle
+    /// that still fits it, and the whole arrangement is centred afterwards.
     func tidyLayout(in size: CGSize, style: LayoutStyle = .grid) {
-        let count = websites.count + widgets.count
-        guard count > 0 else { return }
-        let columns = style == .grid ? max(1, Int(ceil(sqrt(Double(count))))) : 1
-        let rows = Int(ceil(Double(count) / Double(columns)))
-        let cellWidth = size.width / CGFloat(columns + 1)
-        let cellHeight = size.height / CGFloat(rows + 1)
-        // Animate each surface to its tidy position with a spring stagger
-        for (index, surface) in websites.enumerated() {
-            let pos = layoutPoint(index: index, columns: columns, cellWidth: cellWidth, cellHeight: cellHeight, style: style)
-            let delay = Double(index) * 0.06
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                withAnimation(.spring(response: 0.55, dampingFraction: 0.75)) {
-                    surface.center = pos
-                    self?.objectWillChange.send()
-                }
-            }
+        struct Item {
+            let isWidget: Bool
+            let index: Int
+            var size: CGSize
+            var center: CGPoint
         }
-        for (index, widget) in widgets.enumerated() {
-            let pos = layoutPoint(index: websites.count + index, columns: columns, cellWidth: cellWidth, cellHeight: cellHeight, style: style)
-            let delay = Double(websites.count + index) * 0.06
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                withAnimation(.spring(response: 0.55, dampingFraction: 0.75)) {
-                    widget.center = pos
-                    self?.objectWillChange.send()
-                }
-            }
-        }
-    }
 
-    private func layoutPoint(index: Int, columns: Int, cellWidth: CGFloat, cellHeight: CGFloat, style: LayoutStyle) -> CGPoint {
-        style == .cascade
-            ? CGPoint(x: cellWidth + CGFloat(index * 42), y: cellHeight + CGFloat(index * 34))
-            : CGPoint(x: cellWidth * CGFloat(index % columns + 1), y: cellHeight * CGFloat(index / columns + 1))
+        var items: [Item] = websites.enumerated().map {
+            Item(isWidget: false, index: $0.offset, size: $0.element.size, center: .zero)
+        }
+        items += widgets.enumerated().map {
+            Item(isWidget: true, index: $0.offset, size: $0.element.size, center: .zero)
+        }
+        guard !items.isEmpty else { return }
+
+        let gap: CGFloat = 18
+        let usable = CGRect(x: 34, y: 92,
+                            width: max(240, size.width - 68),
+                            height: max(240, size.height - 168))
+
+        // Fit everything into the workspace before placing it: shrink uniformly
+        // when the surfaces would not fit at their current sizes.
+        let totalArea = items.reduce(CGFloat(0)) { $0 + $1.size.width * $1.size.height }
+        var scale: CGFloat = 1
+        if totalArea > usable.width * usable.height * 0.72 {
+            scale = max(0.55, sqrt(usable.width * usable.height * 0.72 / totalArea))
+        }
+        for i in items.indices {
+            items[i].size = CGSize(width: max(260, items[i].size.width * scale),
+                                   height: max(200, items[i].size.height * scale))
+        }
+
+        var remaining = [usable]
+        var placed: [Int] = []
+
+        // Big surfaces first: they are the ones with the fewest options.
+        let order = items.indices.sorted { a, b in
+            let sa = items[a].size.width * items[a].size.height
+            let sb = items[b].size.width * items[b].size.height
+            return sa > sb
+        }
+
+        for i in order {
+            var need = items[i].size
+            // Prefer the free rectangle with the least wasted area.
+            func score(_ r: CGRect) -> CGFloat {
+                r.width * r.height - need.width * need.height
+            }
+            var slot = remaining
+                .filter { $0.width >= need.width && $0.height >= need.height }
+                .min { score($0) < score($1) }
+
+            if slot == nil {
+                // Nothing fits at full size: take the largest free rectangle and
+                // shrink this surface into it, keeping its aspect ratio.
+                guard let big = remaining.max(by: { $0.width * $0.height < $1.width * $1.height }) else { continue }
+                let fit = min(big.width / need.width, big.height / need.height)
+                need = CGSize(width: max(200, need.width * fit), height: max(150, need.height * fit))
+                slot = big
+            }
+            guard let rect = slot else { continue }
+
+            items[i].size = need
+            items[i].center = CGPoint(x: rect.minX + need.width / 2, y: rect.minY + need.height / 2)
+            placed.append(i)
+
+            remaining.removeAll { $0 == rect }
+            let right = CGRect(x: rect.minX + need.width + gap, y: rect.minY,
+                               width: rect.width - need.width - gap, height: need.height)
+            let below = CGRect(x: rect.minX, y: rect.minY + need.height + gap,
+                               width: rect.width, height: rect.height - need.height - gap)
+            if right.width > 180 && right.height > 140 { remaining.append(right) }
+            if below.width > 180 && below.height > 140 { remaining.append(below) }
+        }
+
+        // Centre the packed block inside the usable area.
+        if style == .grid, !placed.isEmpty {
+            let boxes = placed.map { i -> CGRect in
+                let it = items[i]
+                return CGRect(x: it.center.x - it.size.width / 2, y: it.center.y - it.size.height / 2,
+                              width: it.size.width, height: it.size.height)
+            }
+            let union = boxes.dropFirst().reduce(boxes[0]) { $0.union($1) }
+            let dx = usable.midX - union.midX
+            let dy = usable.midY - union.midY
+            for i in placed { items[i].center = CGPoint(x: items[i].center.x + dx, y: items[i].center.y + dy) }
+        }
+
+        // Apply with a small stagger so the move reads as one gesture.
+        for (step, i) in placed.enumerated() {
+            let item = items[i]
+            let delay = Double(step) * 0.04
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self else { return }
+                withAnimation(.spring(response: 0.5, dampingFraction: 0.78)) {
+                    if item.isWidget {
+                        guard item.index < self.widgets.count else { return }
+                        let widget = self.widgets[item.index]
+                        widget.size = item.size
+                        widget.center = item.center
+                    } else {
+                        guard item.index < self.websites.count else { return }
+                        let site = self.websites[item.index]
+                        site.size = item.size
+                        site.center = item.center
+                    }
+                    self.objectWillChange.send()
+                }
+            }
+        }
+        debugLog("tidy packed \(placed.count)/\(items.count) into \(usable.size), scale \(scale)")
     }
 
     func addWebsiteFromPicker(_ address: String, in size: CGSize, rect: CGRect? = nil) {
@@ -965,8 +1060,9 @@ private enum PageScripts {
         let encoded = (try? JSONEncoder().encode(selectors)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
         return """
         (function(){
-          var selectors = \(encoded);
-          var css = selectors.map(function(s){ return s + '{display:none !important}' }).join('\\n');
+          // One shared value: an observer created by an earlier call used to
+          // re-assert the old selectors after "Clear all".
+          window.__seeHideCSS = \(encoded).map(function(s){ return s + '{display:none !important}' }).join(String.fromCharCode(10));
           function ensure(){
             var style = document.getElementById('__see_hide');
             if (!style) {
@@ -974,7 +1070,7 @@ private enum PageScripts {
               style.id = '__see_hide';
               (document.head || document.documentElement).appendChild(style);
             }
-            if (style.textContent !== css) { style.textContent = css; }
+            if (style.textContent !== window.__seeHideCSS) { style.textContent = window.__seeHideCSS; }
           }
           ensure();
           if (!window.__seeHideObserver) {
@@ -983,7 +1079,7 @@ private enum PageScripts {
           }
           if (!window.__seeHideRaf) {
             var ticks = 0;
-            window.__seeHideRaf = setInterval(function(){ ensure(); if (++ticks > 40) { clearInterval(window.__seeHideRaf); } }, 50);
+            window.__seeHideRaf = setInterval(function(){ ensure(); if (++ticks > 40) { clearInterval(window.__seeHideRaf); window.__seeHideRaf = null; } }, 50);
           }
         })();
         """
@@ -1211,9 +1307,105 @@ private enum PageScripts {
           if (value && value !== 'auto' && value !== 'default' && value !== 'inherit') { name = value; break; }
           el = el.parentElement; depth++;
         }
-        try { window.webkit.messageHandlers.seeCursor.postMessage(name); } catch (err) {}
+        var hover = '';
+        try {
+          var h = document.querySelectorAll(':hover');
+          if (h.length) { var last = h[h.length - 1]; hover = last.tagName + '.' + (last.className || '').toString().slice(0, 24); }
+        } catch (err) {}
+        try { window.webkit.messageHandlers.seeCursor.postMessage(name + '|' + hover); } catch (err) {}
         return name;
       };
+
+      // WebKit never forwards mouse moves to a page inside See's overlay, so
+      // `:hover` styles (button highlights, tooltips) stay dark. Rebuild the
+      // page's own hover rules against a class we control and move that class
+      // to whatever is under the pointer.
+      var hoverEls = [];
+      function buildHoverCSS(){
+        var out = [];
+        var sheets = document.styleSheets;
+        for (var i = 0; i < sheets.length; i++) {
+          var rules = null;
+          try { rules = sheets[i].cssRules; } catch (err) { continue; }
+          if (!rules) { continue; }
+          collect(rules, out);
+        }
+        var style = document.getElementById('__see_hover_css');
+        if (!style) {
+          style = document.createElement('style');
+          style.id = '__see_hover_css';
+          (document.head || document.documentElement).appendChild(style);
+        }
+        var css = out.join(String.fromCharCode(10));
+        if (style.textContent.length !== css.length) { style.textContent = css; }
+      }
+      function collect(rules, out){
+        for (var i = 0; i < rules.length; i++) {
+          var rule = rules[i];
+          if (rule.selectorText && rule.selectorText.indexOf(':hover') >= 0) {
+            var parts = rule.selectorText.split(',');
+            var converted = [];
+            for (var j = 0; j < parts.length; j++) {
+              var sel = parts[j].trim();
+              if (sel.indexOf(':hover') < 0) { continue; }
+              converted.push(sel.replace(/:hover/g, '.__see-hover'));
+            }
+            if (converted.length) {
+              try { out.push(converted.join(',') + '{' + rule.style.cssText + '}'); } catch (err) {}
+            }
+          } else if (rule.cssRules) {
+            collect(rule.cssRules, out);
+          }
+        }
+      }
+      var hoverBuilt = 0;
+      window.__seeSmartHover = function(x, y){
+        var now = Date.now();
+        if (now - hoverBuilt > 2500) { hoverBuilt = now; try { buildHoverCSS(); } catch (err) {} }
+        var el = document.elementFromPoint(x, y);
+        if (hoverEls.length && hoverEls[0] === el) { return; }
+        for (var k = 0; k < hoverEls.length; k++) { hoverEls[k].classList.remove('__see-hover'); }
+        hoverEls = [];
+        if (!el || el === document.documentElement) { return; }
+        var node = el, depth = 0;
+        while (node && node !== document.documentElement && depth < 8) {
+          node.classList.add('__see-hover');
+          hoverEls.push(node);
+          node = node.parentElement; depth++;
+        }
+        var current = el;
+        try { buildHoverCSS(); } catch (err) {}
+        if (current && current.dispatchEvent) {
+          var opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y };
+          current.dispatchEvent(new MouseEvent('mouseover', opts));
+          current.dispatchEvent(new MouseEvent('mousemove', opts));
+        }
+      };
+      window.__seeSmartHoverClear = function(){
+        for (var k = 0; k < hoverEls.length; k++) { hoverEls[k].classList.remove('__see-hover'); }
+        hoverEls = [];
+      };
+    })();
+    """
+
+    /// Removes any leftover zap overlay. Injected on every load so a session
+    /// that ended while the page was busy can never leave a red box behind.
+    static let clearPicker = """
+    (function(){
+      if (window.__seePickerActive) { return; }
+      ['__see_zap_box', '__see_zap_label'].forEach(function(id){
+        var el = document.getElementById(id);
+        if (el) { el.remove(); }
+      });
+      document.documentElement.style.cursor = '';
+      var again = function(){
+        if (window.__seePickerActive) { return; }
+        ['__see_zap_box', '__see_zap_label'].forEach(function(id){
+          var el = document.getElementById(id);
+          if (el) { el.remove(); }
+        });
+      };
+      setTimeout(again, 300); setTimeout(again, 1500);
     })();
     """
 
@@ -1224,6 +1416,7 @@ private enum PageScripts {
       if (window.__seePickerClick) { document.removeEventListener('click', window.__seePickerClick, true); }
       if (window.__seePickerKey) { document.removeEventListener('keydown', window.__seePickerKey, true); }
       document.documentElement.style.cursor = '';
+      window.__seePickerActive = false;
       ['__see_zap_box', '__see_zap_label'].forEach(function(id){
         var el = document.getElementById(id);
         if (el) { el.style.display = 'none'; el.remove(); }
@@ -1248,7 +1441,10 @@ private final class SeeWebBridge: NSObject, WKScriptMessageHandler {
         case "seeDebugLog":
             if let text = message.body as? String { debugLog("picker: \(text)") }
         case "seeCursor":
-            if let name = message.body as? String { site?.pageCursor = name }
+            if let body = message.body as? String {
+                let parts = body.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
+                site?.pageCursor = String(parts.first ?? "default")
+            }
         case "seeScroll":
             if let value = message.body as? Double { site?.scrollY = value }
             else if let value = message.body as? NSNumber { site?.scrollY = value.doubleValue }
@@ -1309,7 +1505,7 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     /// Still image shown in place of the live page while a See panel is open.
     @Published var chromeSnapshot: NSImage?
     weak var webView: WKWebView?
-    weak var webHost: NSView?
+    weak var webHost: WebsiteHostView?
     private var refreshTimer: Timer?
 
     init(address: String, title: String, center: CGPoint, id: UUID = UUID(),
@@ -1410,6 +1606,9 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         if isPickingElements {
             controller.addUserScript(WKUserScript(source: PageScripts.picker,
                                                   injectionTime: .atDocumentEnd, forMainFrameOnly: false))
+        } else {
+            controller.addUserScript(WKUserScript(source: PageScripts.clearPicker,
+                                                  injectionTime: .atDocumentEnd, forMainFrameOnly: false))
         }
     }
 
@@ -1418,6 +1617,11 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         // An empty list clears the stylesheet, which is how an "unzap" becomes
         // visible immediately instead of after a reload.
         webView.evaluateJavaScript(PageScripts.hideCSS(config.hiddenSelectors), completionHandler: nil)
+        if config.hiddenSelectors.isEmpty {
+            webView.evaluateJavaScript("var s=document.getElementById('__see_hide'); s ? s.textContent.length : -1") { value, _ in
+                debugLog("hide cleared, css length=\(String(describing: value))")
+            }
+        }
         installUserScripts(in: webView)
         refreshChromeSnapshot()
     }
@@ -1431,8 +1635,12 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         debugLog("setPicking \(picking) hidden=\(String(describing: webView?.isHidden))")
         guard let webView else { return }
         installUserScripts(in: webView)
-        webView.evaluateJavaScript(picking ? PageScripts.picker : PageScripts.stopPicker,
-                                   completionHandler: nil)
+        webView.evaluateJavaScript(picking ? PageScripts.picker : PageScripts.stopPicker) { [weak webView] _, _ in
+            guard !picking else { return }
+            webView?.evaluateJavaScript("(document.getElementById('__see_zap_box') ? 'box ' : '') + (document.getElementById('__see_zap_label') ? 'label ' : '') + '|' + document.documentElement.style.cursor") { value, _ in
+                debugLog("picker cleanup left=\(String(describing: value))")
+            }
+        }
         if picking {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak webView] in
                 webView?.evaluateJavaScript("window.__seeHoverAt && window.__seeHoverAt(300,200); JSON.stringify({a: !!window.__seePickerActive, m: typeof window.__seeHoverAt, tag: (document.elementFromPoint(300,200)||{}).tagName, cls: (document.elementFromPoint(300,200)||{}).className, boxLeft: (document.getElementById('__see_zap_box')||{}).style ? document.getElementById('__see_zap_box').style.left : 'none', boxW: document.getElementById('__see_zap_box') ? document.getElementById('__see_zap_box').style.width : 'none'})") { value, error in
@@ -1468,7 +1676,11 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         lastProbeAt = now; lastProbePoint = point
         let x = Int(point.x.rounded()), y = Int(point.y.rounded())
         guard x >= 0, y >= 0, x <= Int(size.width), y <= Int(size.height) else { return }
-        webView.evaluateJavaScript("window.__seeCursorAt && window.__seeCursorAt(\(x), \(y));", completionHandler: nil)
+        webView.evaluateJavaScript("window.__seeSmartHover && window.__seeSmartHover(\(x), \(y)); window.__seeCursorAt && window.__seeCursorAt(\(x), \(y));", completionHandler: nil)
+    }
+
+    func clearHover() {
+        webView?.evaluateJavaScript("window.__seeSmartHoverClear && window.__seeSmartHoverClear();", completionHandler: nil)
     }
 
     func addHiddenSelector(_ selector: String) {
@@ -1534,6 +1746,9 @@ private struct WebsiteView: NSViewRepresentable {
         host.onPick = onPick
         host.webView.allowsBackForwardNavigationGestures = true
         host.webView.setValue(false, forKey: "drawsBackground")
+        // WebKit paints the untouched backing store white while a history
+        // navigation swaps documents; match the surface colour instead.
+        host.webView.underPageBackgroundColor = NSColor(calibratedRed: 0.086, green: 0.090, blue: 0.098, alpha: 1)
         host.webView.customUserAgent = site.config.userAgent.string
         host.webView.appearance = site.config.darkMode ? NSAppearance(named: .darkAqua) : nil
         site.webView = host.webView
@@ -1628,6 +1843,9 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate {
     }
 
     override func mouseEntered(with event: NSEvent) {
+        // WebKit only forwards pointer events to the page while the web view is
+        // the first responder.
+        window?.makeFirstResponder(webView)
         onHoverChange?(true); debugLog("site hover enter bounds=\(bounds)")
         handles.isNearClose = true; handles.needsDisplay = true
         updateProximity(at: convert(event.locationInWindow, from: nil))
@@ -1643,7 +1861,6 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate {
         let local = convert(event.locationInWindow, from: nil)
         if bounds.contains(local) { return }
         onHoverChange?(false)
-        NSCursor.arrow.set()
         debugLog("site hover exit")
         if handles.isNearControl { handles.isNearControl = false; handles.needsDisplay = true }
         if handles.isNearClose { handles.isNearClose = false; handles.needsDisplay = true }
@@ -1656,12 +1873,25 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate {
     }
 
     override func mouseMoved(with event: NSEvent) {
-        let local = convert(event.locationInWindow, from: nil)
-        updateProximity(at: local)
-        if closeRect.contains(local) { NSCursor.pointingHand.set() }
-        else if moveRect.contains(local) { NSCursor.openHand.set() }
-        else if resizeRect.contains(local) { seeResizeCursor().set() }
-        else { NSCursor.arrow.set() }
+        // The cursor is owned by SeeOverlay.updateCursor: setting it here as
+        // well made it flicker between the handle cursor and the arrow.
+        updateProximity(at: convert(event.locationInWindow, from: nil))
+    }
+
+    private var lastForward = CFAbsoluteTimeGetCurrent()
+
+    /// Replays the global pointer position into the page. See's panel is never
+    /// the key window, so AppKit never delivers mouse-moved events on its own
+    /// and `:hover` styles (button highlights, tooltips) never fired.
+    func forwardHover(atWindowPoint point: CGPoint) {
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastForward > 0.012, let window else { return }
+        lastForward = now
+        guard let event = NSEvent.mouseEvent(with: .mouseMoved, location: point,
+                                             modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: window.windowNumber, context: nil,
+                                             eventNumber: 0, clickCount: 0, pressure: 0) else { return }
+        webView.mouseMoved(with: event)
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -1760,7 +1990,15 @@ private enum SurfaceHandleKind: Equatable { case move, resize }
 private enum SurfaceCursorZone: Equatable { case close, move, resize }
 
 @MainActor
-private final class CursorZoneState { static var key: String = "" }
+private final class PointerPump {
+    static weak var site: WebsiteSurface?
+}
+
+@MainActor
+private final class CursorZoneState {
+    static var key: String = ""
+    static var applied: NSCursor?
+}
 
 /// Handle hit zones in screen coordinates, matching the surface's control layout.
 private func surfaceCursorZone(_ p: CGPoint, _ rect: CGRect, close: Bool) -> SurfaceCursorZone? {
@@ -1995,6 +2233,14 @@ private struct SeeOverlay: View {
         let p = CGPoint(x: screenPoint.x, y: screenHeight - screenPoint.y)
         MenuHover.shared.update(point: p)
         updateCursor(at: p)
+        // Feed the pointer to the page under it, so `:hover` styles and
+        // tooltips inside a website behave as they do in a browser.
+        if let site = model.website(at: p) {
+            PointerPump.site = site
+        } else if let previous = PointerPump.site {
+            PointerPump.site = nil
+            previous.clearHover()
+        }
         guard model.websites.contains(where: { $0.isPickingElements }) else { return }
         for site in model.websites where site.isPickingElements {
             let frame = CGRect(x: site.center.x - site.size.width / 2,
@@ -2048,27 +2294,35 @@ private struct SeeOverlay: View {
 
     private func setCursor(zone: SurfaceCursorZone?, page: String) {
         let key = "\(zone.map(String.init(describing:)) ?? "-")|\(page)"
-        guard key != CursorZoneState.key else { return }
-        CursorZoneState.key = key
-        debugLog("cursor \(key)")
-        switch zone {
-        case .close: NSCursor.pointingHand.set(); return
-        case .move: NSCursor.openHand.set(); return
-        case .resize: seeResizeCursor().set(); return
-        case nil: break
+        let cursor: NSCursor = {
+            switch zone {
+            case .close: return .pointingHand
+            case .move: return .openHand
+            case .resize: return seeResizeCursor()
+            case nil: break
+            }
+            switch page {
+            case "pointer", "hand": return .pointingHand
+            case "text", "vertical-text": return .iBeam
+            case "crosshair", "cell": return .crosshair
+            case "grab": return .openHand
+            case "grabbing", "move", "all-scroll": return .closedHand
+            case "col-resize", "e-resize", "w-resize", "ew-resize": return .resizeLeftRight
+            case "row-resize", "n-resize", "s-resize", "ns-resize": return .resizeUpDown
+            case "not-allowed", "no-drop": return .operationNotAllowed
+            case "help": return .contextualMenu
+            default: return .arrow
+            }
+        }()
+        if key != CursorZoneState.key {
+            CursorZoneState.key = key
+            CursorZoneState.applied = cursor
+            debugLog("cursor \(key)")
         }
-        switch page {
-        case "pointer", "hand": NSCursor.pointingHand.set()
-        case "text", "vertical-text": NSCursor.iBeam.set()
-        case "crosshair", "cell": NSCursor.crosshair.set()
-        case "grab": NSCursor.openHand.set()
-        case "grabbing", "move", "all-scroll": NSCursor.closedHand.set()
-        case "col-resize", "e-resize", "w-resize", "ew-resize": NSCursor.resizeLeftRight.set()
-        case "row-resize", "n-resize", "s-resize", "ns-resize": NSCursor.resizeUpDown.set()
-        case "not-allowed", "no-drop": NSCursor.operationNotAllowed.set()
-        case "help": NSCursor.contextualMenu.set()
-        default: NSCursor.arrow.set()
-        }
+        cursor.set()
+        // AppKit's cursor rects and WebKit's own hover handling run later in the
+        // same event pass, which made the pointer flicker between two cursors.
+        DispatchQueue.main.async { cursor.set() }
     }
 
     private func dismissTopmost() {
