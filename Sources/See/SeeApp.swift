@@ -2849,7 +2849,8 @@ private struct WebsiteSurfaceView: View {
 /// and gradient tinted every widget; this reads the real background instead.
 private struct BehindWindowGlass: NSViewRepresentable {
     var material: NSVisualEffectView.Material = .underWindowBackground
-    var scrim: Double = 0.04
+    /// 30% transparency: the dark glass tint sits at 0.70 over the blur.
+    var scrim: Double = 0.70
 
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
@@ -3015,9 +3016,11 @@ private struct NativeWidgetView: View {
                 .background {
                     ZStack {
                         BehindWindowGlass()
-                        // Reflective tint lifts the widget off the workspace.
-                        LinearGradient(colors: [.white.opacity(0.14), .white.opacity(0.03)],
-                                       startPoint: .topLeading, endPoint: .bottomTrailing)
+                        // The scrim itself is the 70% dark tint; this only adds
+                        // the crisp highlight along the top edge.
+                        LinearGradient(colors: [.white.opacity(0.16), .white.opacity(0.0),
+                                                .white.opacity(0.03)],
+                                       startPoint: .top, endPoint: .bottom)
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                 }
