@@ -6,6 +6,8 @@ import WebKit
 
 extension Notification.Name {
     static let seeEscape = Notification.Name("SeeEscapePressed")
+    static let seePeekOpened = Notification.Name("SeePeekOpened")
+    static let seePeekClosed = Notification.Name("SeePeekClosed")
 }
 
 func debugLog(_ message: String) {
@@ -70,9 +72,24 @@ private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
         panel.alphaValue = 0
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        NotificationCenter.default.post(name: .seePeekOpened, object: nil)
+        if let layer = panel.contentView?.layer {
+            layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+            layer.position = CGPoint(x: panel.frame.midX, y: panel.frame.midY)
+            let from = CATransform3DConcat(CATransform3DMakeScale(0.972, 0.972, 1),
+                                           CATransform3DMakeTranslation(0, -14, 0))
+            layer.transform = from
+            layer.opacity = 0
+            CATransaction.begin()
+            CATransaction.setAnimationDuration(0.52)
+            CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(controlPoints: 0.16, 1.0, 0.3, 1.0))
+            layer.transform = CATransform3DIdentity
+            layer.opacity = 1
+            CATransaction.commit()
+        }
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.48
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            ctx.duration = 0.34
+            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.16, 1.0, 0.3, 1.0)
             panel.animator().alphaValue = 1
         }
         if escapeMonitor == nil {
@@ -86,11 +103,25 @@ private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
 
     private func hidePanel() {
         guard let panel, panel.isVisible else { return }
+        NotificationCenter.default.post(name: .seePeekClosed, object: nil)
+        if let layer = panel.contentView?.layer {
+            CATransaction.begin()
+            CATransaction.setAnimationDuration(0.20)
+            CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeIn))
+            layer.transform = CATransform3DMakeScale(1.015, 1.015, 1)
+            CATransaction.commit()
+        }
         NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.22
+            ctx.duration = 0.20
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
             panel.animator().alphaValue = 0
-        }, completionHandler: { Task { @MainActor in panel.orderOut(nil); panel.alphaValue = 1 } })
+        }, completionHandler: {
+            Task { @MainActor in
+                panel.orderOut(nil)
+                panel.alphaValue = 1
+                panel.contentView?.layer?.transform = CATransform3DIdentity
+            }
+        })
     }
 
     private func makePanel() -> SeeOverlayPanel {
@@ -101,6 +132,7 @@ private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
+        panel.acceptsMouseMovedEvents = true
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         panel.contentView = FirstMouseHostingView(rootView: SeeOverlay(onClose: { [weak self] in self?.hidePanel() }, model: model))
@@ -200,6 +232,7 @@ final class WorkspaceInteractionView: NSView {
             case .leftMouseDown:
                 debugLog("left down at \(point) key=\(self.window?.isKeyWindow == true) active=\(NSApp.isActive)")
                 if let menuFrame = self.contextMenuFrame?(), !menuFrame.contains(point) { self.onDismiss?() }
+                else if self.contextMenuFrame?() == nil { self.onDismiss?() }
                 // Only start drag-to-create on empty workspace
                 if self.isSurfaceAt?(point) == false { self.dragStart = point }
                 return event
@@ -228,6 +261,17 @@ final class WorkspaceInteractionView: NSView {
 }
 
 // MARK: - Model
+
+/// Anchors a menu's top-left corner at the click point, clamped to the screen.
+private func menuOrigin(for point: CGPoint, size: CGSize, menu: CGSize) -> CGPoint {
+    CGPoint(x: min(max(point.x, 10), max(10, size.width - menu.width - 10)),
+            y: min(max(point.y, 10), max(10, size.height - menu.height - 10)))
+}
+
+private enum MenuMetrics {
+    static let workspace = CGSize(width: 256, height: 268)
+    static let surface = CGSize(width: 232, height: 172)
+}
 
 private struct SurfaceMenuTarget: Identifiable {
     let id = UUID()
@@ -551,16 +595,32 @@ private struct WebsiteConfig: Codable, Equatable {
 }
 
 private enum AutoRefreshOption: Double, CaseIterable, Identifiable {
-    case off = 0, fifteen = 15, thirty = 30, minute = 60, five = 300, fifteenMin = 900
+    case off = 0
+    case everyPeek = -1
+    case minutes30 = 1800
+    case minutes15 = 900
+    case minutes5 = 300
+    case minute = 60
     var id: Double { rawValue }
     var title: String {
         switch self {
         case .off: "Off"
-        case .fifteen: "15s"
-        case .thirty: "30s"
-        case .minute: "1m"
-        case .five: "5m"
-        case .fifteenMin: "15m"
+        case .everyPeek: "Every peek"
+        case .minutes30: "Every 30 minutes"
+        case .minutes15: "Every 15 minutes"
+        case .minutes5: "Every 5 minutes"
+        case .minute: "Every 1 minute"
+        }
+    }
+    /// Short form for the collapsed control.
+    var shortTitle: String {
+        switch self {
+        case .off: "Off"
+        case .everyPeek: "Every peek"
+        case .minutes30: "Every 30 min"
+        case .minutes15: "Every 15 min"
+        case .minutes5: "Every 5 min"
+        case .minute: "Every 1 min"
         }
     }
 }
@@ -676,11 +736,64 @@ private enum PageScripts {
     (function(){
       if (window.__seePickerActive) { return; }
       window.__seePickerActive = true;
-      var highlighted = null;
-      function clear(){
-        if (highlighted && highlighted.style) { highlighted.style.outline = ''; highlighted.style.outlineOffset = ''; }
-        highlighted = null;
+      var target = null;
+      var box = document.createElement('div');
+      box.id = '__see_zap_box';
+      box.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483647;border:2px solid #ff453a;'
+        + 'background:rgba(255,69,58,0.16);border-radius:6px;transition:all .07s ease-out;'
+        + 'box-shadow:0 0 0 1px rgba(0,0,0,0.35),0 8px 30px rgba(255,69,58,0.28);display:none;';
+      var label = document.createElement('div');
+      label.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483647;'
+        + 'font:600 11px -apple-system,BlinkMacSystemFont,sans-serif;color:#fff;'
+        + 'background:#ff453a;padding:3px 8px;border-radius:6px;letter-spacing:.2px;'
+        + 'box-shadow:0 4px 14px rgba(0,0,0,0.35);display:none;white-space:nowrap;';
+      label.textContent = 'Zap this element';
+      function attach(){
+        if (!box.isConnected) { document.documentElement.appendChild(box); }
+        if (!label.isConnected) { document.documentElement.appendChild(label); }
       }
+      function clear(){
+        target = null;
+        box.style.display = 'none';
+        label.style.display = 'none';
+      }
+      function paint(el){
+        if (!el || el.nodeType !== 1) { clear(); return; }
+        target = el;
+        var r = el.getBoundingClientRect();
+        attach();
+        box.style.display = 'block';
+        box.style.left = r.left + 'px';
+        box.style.top = r.top + 'px';
+        box.style.width = r.width + 'px';
+        box.style.height = r.height + 'px';
+        label.style.display = 'block';
+        label.textContent = 'Zap  ' + el.tagName.toLowerCase()
+          + (el.id ? '#' + el.id : '')
+          + (typeof el.className === 'string' && el.className ? '.' + el.className.trim().split(/\\s+/)[0] : '');
+        var ly = r.top > 26 ? r.top - 24 : r.bottom + 6;
+        ly = Math.max(4, Math.min(ly, window.innerHeight - 24));
+        label.style.left = Math.max(4, Math.min(r.left, window.innerWidth - 130)) + 'px';
+        label.style.top = ly + 'px';
+      }
+      function deepest(el, x, y){
+        var node = el;
+        for (var i = 0; i < 16; i++) {
+          var next = null;
+          var kids = node.children || [];
+          for (var k = 0; k < kids.length; k++) {
+            var kid = kids[k];
+            if (kid === box || kid === label) { continue; }
+            var r = kid.getBoundingClientRect();
+            if (r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < window.innerHeight
+                && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) { next = kid; break; }
+          }
+          if (!next) { break; }
+          node = next;
+        }
+        return node;
+      }
+
       function pathFor(el){
         if (!el || el.nodeType !== 1) { return null; }
         if (el.id) { return '#' + CSS.escape(el.id); }
@@ -701,25 +814,66 @@ private enum PageScripts {
         }
         return parts.join(' > ');
       }
+      var lastDebug = 0;
+      function dbg(text){
+        var now = Date.now();
+        if (now - lastDebug < 400) { return; }
+        lastDebug = now;
+        try { window.webkit.messageHandlers.seeDebugLog.postMessage(text); } catch (err) {}
+      }
       window.__seePickerMove = function(e){
-        clear();
-        highlighted = e.target;
-        if (highlighted && highlighted.style) {
-          highlighted.style.outline = '2px solid #ff453a';
-          highlighted.style.outlineOffset = '-2px';
-        }
+        attach();
+        try {
+          dbg('move ' + e.clientX + ',' + e.clientY + ' hit=' + (document.elementFromPoint(e.clientX, e.clientY) || {}).tagName);
+        } catch (err) { dbg('err ' + err); }
+        var el = document.elementFromPoint(e.clientX, e.clientY);
+        if (el && (el === box || el === label)) { return; }
+        // Nothing but page background under the cursor: don't frame the whole page.
+        if (!el || el === document.body || el === document.documentElement) { clear(); return; }
+        el = deepest(el, e.clientX, e.clientY);
+        if (el === document.body || el === document.documentElement) { clear(); return; }
+        dbg('paint ' + el.tagName + '.' + (el.className || '') + ' #' + (el.id || ''));
+        paint(el);
       };
       window.__seePickerClick = function(e){
         e.preventDefault(); e.stopPropagation();
-        var selector = pathFor(e.target);
+        var el = document.elementFromPoint(e.clientX, e.clientY) || e.target;
+        if (el === box || el === label) { el = target; }
+        el = deepest(el, e.clientX, e.clientY);
+        var selector = pathFor(el);
         clear();
-        if (selector) { try { window.webkit.messageHandlers.seePicked.postMessage(selector); } catch (err) {} }
+        if (selector) {
+          // Hide instantly so the user sees the zap land, before the app replies.
+          el.style.setProperty('display', 'none', 'important');
+          try { window.webkit.messageHandlers.seePicked.postMessage(selector); } catch (err) {}
+        }
       };
+      window.__seeHoverAt = function(x, y){
+        attach();
+        var el = document.elementFromPoint(x, y);
+        if (!el || el === box || el === label || el === document.body || el === document.documentElement) { clear(); return; }
+        el = deepest(el, x, y);
+        if (el === document.body || el === document.documentElement) { clear(); return; }
+        if (el !== target) { paint(el); }
+      };
+      window.__seePickerScroll = function(){ if (target) { paint(target); } };
       window.__seePickerKey = function(e){ if (e.key === 'Escape') { clear(); } };
+      window.__seePickerMoveEvt = function(e){
+        if (e.target === box || e.target === label) { return; }
+        attach();
+        var el = document.elementFromPoint(e.clientX, e.clientY);
+        if (!el || el === document.body || el === document.documentElement) { clear(); return; }
+        el = deepest(el, e.clientX, e.clientY);
+        if (el === document.body || el === document.documentElement) { clear(); return; }
+        if (el !== target) { paint(el); }
+      };
       document.addEventListener('mouseover', window.__seePickerMove, true);
+      document.addEventListener('mousemove', window.__seePickerMoveEvt, true);
       document.addEventListener('click', window.__seePickerClick, true);
       document.addEventListener('keydown', window.__seePickerKey, true);
+      window.addEventListener('scroll', window.__seePickerScroll, true);
       document.documentElement.style.cursor = 'crosshair';
+      attach();
     })();
     """
 
@@ -730,6 +884,9 @@ private enum PageScripts {
       if (window.__seePickerClick) { document.removeEventListener('click', window.__seePickerClick, true); }
       if (window.__seePickerKey) { document.removeEventListener('keydown', window.__seePickerKey, true); }
       document.documentElement.style.cursor = '';
+      var box = document.getElementById('__see_zap_box');
+      if (box) { box.remove(); }
+      window.__seePickerActive = false;
     })();
     """
 }
@@ -745,6 +902,8 @@ private final class SeeWebBridge: NSObject, WKScriptMessageHandler {
         switch message.name {
         case "seePicked":
             if let selector = message.body as? String { onPick?(selector) }
+        case "seeDebugLog":
+            if let text = message.body as? String { debugLog("picker: \(text)") }
         case "seeScroll":
             if let value = message.body as? Double { site?.scrollY = value }
             else if let value = message.body as? NSNumber { site?.scrollY = value.doubleValue }
@@ -832,6 +991,11 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
 
     func reload() { webView?.reload() }
 
+    func refreshOnPeekIfNeeded() {
+        guard config.autoRefresh == AutoRefreshOption.everyPeek.rawValue else { return }
+        webView?.reload()
+    }
+
     // The live web view is an AppKit subview, so it always draws above
     // SwiftUI panels in the same window. Freeze it to an image and hide it
     // while a panel is open, then bring the live page straight back.
@@ -847,6 +1011,7 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     }
 
     func exitChromeMode() {
+        debugLog("exitChromeMode hidden=\(String(describing: webView?.isHidden)) snap=\(chromeSnapshot != nil)")
         guard chromeSnapshot != nil || webView?.isHidden == true else { return }
         chromeSnapshot = nil
         webView?.isHidden = false
@@ -894,17 +1059,52 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     func setPicking(_ picking: Bool) {
         guard picking != isPickingElements else { return }
         isPickingElements = picking
+        debugLog("setPicking \(picking) hidden=\(String(describing: webView?.isHidden))")
         guard let webView else { return }
         installUserScripts(in: webView)
         webView.evaluateJavaScript(picking ? PageScripts.picker : PageScripts.stopPicker,
                                    completionHandler: nil)
+        if picking {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak webView] in
+                webView?.evaluateJavaScript("window.__seeHoverAt && window.__seeHoverAt(300,200); JSON.stringify({a: !!window.__seePickerActive, m: typeof window.__seeHoverAt, tag: (document.elementFromPoint(300,200)||{}).tagName, cls: (document.elementFromPoint(300,200)||{}).className, boxLeft: (document.getElementById('__see_zap_box')||{}).style ? document.getElementById('__see_zap_box').style.left : 'none', boxW: document.getElementById('__see_zap_box') ? document.getElementById('__see_zap_box').style.width : 'none'})") { value, error in
+                    debugLog("picker state: \(String(describing: value)) err=\(String(describing: error))")
+                }
+            }
+        }
+    }
+
+    private var lastHoverAt = CFAbsoluteTimeGetCurrent()
+
+    /// App-driven highlighter: WKWebView does not receive mouse-moved events under
+    /// the accessory panel, so the window forwards the pointer position instead.
+    func hoverAt(_ point: CGPoint) {
+        guard isPickingElements, let webView else { return }
+        let now = CFAbsoluteTimeGetCurrent()
+        if now - lastHoverAt < 0.016 { return }
+        lastHoverAt = now
+        let x = Int(point.x.rounded()), y = Int(point.y.rounded())
+        guard x >= 0, y >= 0, x <= Int(size.width), y <= Int(size.height) else { return }
+        webView.evaluateJavaScript("window.__seeHoverAt && window.__seeHoverAt(\(x), \(y));", completionHandler: nil)
     }
 
     func addHiddenSelector(_ selector: String) {
-        guard !config.hiddenSelectors.contains(selector) else { return }
-        config.hiddenSelectors.append(selector)
+        if !config.hiddenSelectors.contains(selector) {
+            config.hiddenSelectors.append(selector)
+        }
         applyHiddenSelectors()
+        // The page already hid the element in JS; refresh the frozen snapshot so
+        // the panel shows the result without waiting for a reload.
+        refreshChromeSnapshot()
         debugLog("hide selector \(selector)")
+    }
+
+    func refreshChromeSnapshot() {
+        guard chromeSnapshot != nil || webView?.isHidden == true else { return }
+        chromeSnapshot = nil
+        webView?.isHidden = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { [weak self] in
+            self?.enterChromeMode()
+        }
     }
 
     func didFinishLoad(in webView: WKWebView) {
@@ -997,6 +1197,7 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate {
         let handler = WeakScriptHandler(bridge)
         controller.add(handler, name: "seePicked")
         controller.add(handler, name: "seeScroll")
+        controller.add(handler, name: "seeDebugLog")
         configuration.userContentController = controller
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init(frame: .zero)
@@ -1218,15 +1419,23 @@ private struct SeeOverlay: View {
 
     private let white = Color.white
     private let dim = Color.white.opacity(0.58)
+    @StateObject private var anim = PeekAnimationState()
+    @StateObject private var pointer = PointerWatch()
+    private var appeared: Bool { anim.appeared }
 
     var body: some View {
         GeometryReader { geo in
             let size = geo.size
             ZStack {
                 Color.black.opacity(0.70).ignoresSafeArea()
+                    .opacity(appeared ? 1 : 0)
+                    .animation(.easeOut(duration: 0.34), value: appeared)
                 RadialGradient(colors: [model.backgroundStyle.tint, .clear],
                                center: .center, startRadius: 60, endRadius: size.height * 0.9)
                     .ignoresSafeArea()
+                    .scaleEffect(appeared ? 1 : 1.08)
+                    .opacity(appeared ? 1 : 0)
+                    .animation(.easeOut(duration: 0.55), value: appeared)
 
                 // Website surfaces
                 ForEach(Array(model.websites.enumerated()), id: \.element.id) { index, site in
@@ -1241,6 +1450,11 @@ private struct SeeOverlay: View {
                                               model.configuring = site
                                           }
                                       })
+                        .scaleEffect(appeared ? 1 : 0.955)
+                        .opacity(appeared ? 1 : 0)
+                        .blur(radius: appeared ? 0 : 12)
+                        .animation(.spring(response: 0.55, dampingFraction: 0.86)
+                            .delay(Double(index) * 0.045), value: appeared)
                         .zIndex(model.focusedID == site.id ? 2 : Double(index))
                         .transition(.asymmetric(
                             insertion: .opacity.combined(with: .scale(scale: 0.94)),
@@ -1250,6 +1464,11 @@ private struct SeeOverlay: View {
                 // Native widget surfaces
                 ForEach(Array(model.widgets.enumerated()), id: \.element.id) { index, widget in
                     PlacedWidgetView(widget: widget, onClose: { model.removeWidget(widget) })
+                        .scaleEffect(appeared ? 1 : 0.94)
+                        .opacity(appeared ? 1 : 0)
+                        .blur(radius: appeared ? 0 : 12)
+                        .animation(.spring(response: 0.55, dampingFraction: 0.86)
+                            .delay(Double(model.websites.count + index) * 0.045), value: appeared)
                         .zIndex(3 + Double(index))
                         .transition(.asymmetric(
                             insertion: .opacity.combined(with: .scale(scale: 0.94)),
@@ -1265,6 +1484,9 @@ private struct SeeOverlay: View {
                     bottomBar
                 }
                 .padding(.horizontal, 28).padding(.top, 46).padding(.bottom, 24)
+                .offset(y: appeared ? 0 : -16)
+                .opacity(appeared ? 1 : 0)
+                .animation(.spring(response: 0.5, dampingFraction: 0.9).delay(0.06), value: appeared)
                 .zIndex(60)   // chrome stays usable above live website surfaces
 
                 ChromeOverlay(model: model, onCloseOverlay: onClose)
@@ -1293,7 +1515,7 @@ private struct SeeOverlay: View {
                         }
                     },
                     isSurfaceAt: { pt in isPointOverSurface(pt, size: size) },
-                    contextMenuFrame: { model.contextMenuPoint.map { contextMenuFrame(at: $0, size: size) } },
+                    contextMenuFrame: { activeMenuFrame(in: size) },
                     onDragCreating: { rect in model.dragCreatingRect = rect },
                     onDragCreated: { rect in
                         model.dragCreatingRect = .null
@@ -1316,14 +1538,40 @@ private struct SeeOverlay: View {
                 }
             }
             .onAppear {
+                pointer.start { globalPoint in routeHover(globalPoint) }
                 debugLog("overlay appear active=\(NSApp.isActive) key=\(String(describing: NSApp.keyWindow?.title))")
+                setAppeared(true)
                 guard !model.hasPlacedInitialSite else { return }
                 model.hasPlacedInitialSite = true
             }
         }
         .onExitCommand { dismissTopmost() }
         .onReceive(NotificationCenter.default.publisher(for: .seeEscape)) { _ in dismissTopmost() }
+        .onReceive(NotificationCenter.default.publisher(for: .seePeekOpened)) { _ in
+            setAppeared(false)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { setAppeared(true) }
+            for site in model.websites { site.refreshOnPeekIfNeeded() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .seePeekClosed)) { _ in
+            withAnimation(.easeIn(duration: 0.16)) { setAppeared(false) }
+        }
         .preferredColorScheme(.dark)
+    }
+
+    private func setAppeared(_ value: Bool) { anim.appeared = value }
+
+    private func routeHover(_ screenPoint: CGPoint) {
+        guard model.websites.contains(where: { $0.isPickingElements }) else { return }
+        let screenHeight = NSScreen.main?.frame.height ?? 0
+        let p = CGPoint(x: screenPoint.x, y: screenHeight - screenPoint.y)
+        for site in model.websites where site.isPickingElements {
+            let frame = CGRect(x: site.center.x - site.size.width / 2,
+                               y: site.center.y - site.size.height / 2,
+                               width: site.size.width, height: site.size.height)
+            if frame.contains(p) {
+                site.hoverAt(CGPoint(x: p.x - frame.minX, y: p.y - frame.minY))
+            }
+        }
     }
 
     private func dismissTopmost() {
@@ -1386,14 +1634,16 @@ private struct SeeOverlay: View {
             : widget.center
     }
 
-    private func contextMenuCenter(at pt: CGPoint, size: CGSize) -> CGPoint {
-        CGPoint(x: min(max(pt.x + 128, 128), size.width - 128),
-                y: min(max(pt.y + 132, 132), size.height - 132))
-    }
-
-    private func contextMenuFrame(at pt: CGPoint, size: CGSize) -> CGRect {
-        let c = contextMenuCenter(at: pt, size: size)
-        return CGRect(x: c.x - 128, y: c.y - 132, width: 256, height: 264)
+    private func activeMenuFrame(in size: CGSize) -> CGRect? {
+        if let pt = model.contextMenuPoint {
+            let o = menuOrigin(for: pt, size: size, menu: MenuMetrics.workspace)
+            return CGRect(origin: o, size: MenuMetrics.workspace)
+        }
+        if let menu = model.surfaceMenu {
+            let o = menuOrigin(for: menu.point, size: size, menu: MenuMetrics.surface)
+            return CGRect(origin: o, size: MenuMetrics.surface)
+        }
+        return nil
     }
 
     private func isPointOverSurface(_ pt: CGPoint, size: CGSize) -> Bool {
@@ -1461,6 +1711,30 @@ private struct SeeOverlay: View {
 }
 
 // MARK: - Hover state helpers (ObservableObject avoids Swift 6 Sendable issues)
+
+@MainActor
+private final class PointerWatch: ObservableObject {
+    private var global: Any?
+    private var local: Any?
+
+    func start(_ handler: @escaping (CGPoint) -> Void) {
+        guard global == nil else { return }
+        global = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { _ in
+            let point = NSEvent.mouseLocation
+            Task { @MainActor in handler(point) }
+        }
+        local = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { event in
+            let point = NSEvent.mouseLocation
+            Task { @MainActor in handler(point) }
+            return event
+        }
+    }
+}
+
+@MainActor
+private final class PeekAnimationState: ObservableObject {
+    @Published var appeared = false
+}
 
 @MainActor
 private final class HoverState: ObservableObject {
@@ -1717,13 +1991,15 @@ private struct NativeWidgetView: View {
         switch widget.kind {
         case .clock:
             TimelineView(.periodic(from: .now, by: 1)) { ctx in
-                VStack(alignment: .leading, spacing: 7) {
+                VStack(alignment: .center, spacing: 7) {
                     Text(ctx.date, format: .dateTime.weekday(.wide).month(.wide).day())
                         .font(.system(size: 13, weight: .medium)).foregroundStyle(ink.opacity(0.62))
                     Text(ctx.date, format: .dateTime.hour().minute())
                         .font(.system(size: 56, weight: .light, design: .rounded)).monospacedDigit().foregroundStyle(ink)
                     Text("LOCAL TIME").font(.system(size: 10, weight: .bold)).tracking(2).foregroundStyle(ink.opacity(0.42))
-                }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                }
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
         case .calendar:
             VStack(alignment: .leading, spacing: 14) {
@@ -2094,7 +2370,7 @@ private struct ConfigureWidgetOverlay: View {
                             ForEach(AutoRefreshOption.allCases) { option in
                                 Button(option.title) { site.config.autoRefresh = option.rawValue; site.applyTuning(reload: false) }
                             }
-                        } label: { menuLabel(AutoRefreshOption(rawValue: site.config.autoRefresh)?.title ?? "Off") }
+                        } label: { menuLabel(AutoRefreshOption(rawValue: site.config.autoRefresh)?.shortTitle ?? "Off") }
                         .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
                     }
                     divider
@@ -2265,7 +2541,7 @@ private struct ChromeOverlay: View {
                         onSettings: { withAnimation { model.contextMenuPoint = nil; model.workspacePanel = .settings } },
                         onRemoveAll: { withAnimation { model.contextMenuPoint = nil; model.confirmingRemoveAll = true } }
                     )
-                    .position(contextMenuCenter(at: pt, size: size))
+                    .position(menuCenter(for: pt, size: size, menu: MenuMetrics.workspace))
                     .zIndex(10)
                 }
 
@@ -2298,7 +2574,7 @@ private struct ChromeOverlay: View {
                             withAnimation { model.surfaceMenu = nil }
                         }
                     )
-                    .position(contextMenuCenter(at: menu.point, size: size))
+                    .position(menuCenter(for: menu.point, size: size, menu: MenuMetrics.surface))
                     .zIndex(12)
                 }
 
@@ -2386,8 +2662,8 @@ private struct ChromeOverlay: View {
         }
     }
 
-    private func contextMenuCenter(at pt: CGPoint, size: CGSize) -> CGPoint {
-        CGPoint(x: min(max(pt.x + 128, 128), size.width - 128),
-                y: min(max(pt.y + 132, 132), size.height - 132))
+    private func menuCenter(for point: CGPoint, size: CGSize, menu: CGSize) -> CGPoint {
+        let o = menuOrigin(for: point, size: size, menu: menu)
+        return CGPoint(x: o.x + menu.width / 2, y: o.y + menu.height / 2)
     }
 }
