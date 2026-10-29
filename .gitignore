@@ -1,4 +1,3 @@
 .build/
-.swiftpm/
-See.app/
-preview.png
+*.o
+*.d

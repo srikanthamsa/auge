@@ -762,6 +762,15 @@ private struct SeeOverlay: View {
     }
 }
 
+// MARK: - Hover state helpers (ObservableObject avoids Swift 6 Sendable issues)
+
+@MainActor
+private final class HoverState: ObservableObject {
+    @Published var showClose = false
+    @Published var nearMove = false
+    @Published var nearResize = false
+}
+
 // MARK: - Website surface card
 
 @MainActor
@@ -771,7 +780,7 @@ private struct WebsiteSurfaceView: View {
     let onFocus: () -> Void
     let onClose: () -> Void
 
-    @State private var showClose = false
+    @StateObject private var hover = HoverState()
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -781,10 +790,10 @@ private struct WebsiteSurfaceView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 14))
                 .shadow(color: .black.opacity(isFocused ? 0.38 : 0.22), radius: isFocused ? 30 : 18, y: 12)
                 .onTapGesture(perform: onFocus)
-                .onHover { showClose = $0 }
+                .onHover { v in hover.showClose = v }
 
             // Remove button — top-right, visible on hover
-            if showClose {
+            if hover.showClose {
                 Button(action: onClose) {
                     Image(systemName: "xmark")
                         .font(.system(size: 11, weight: .bold))
@@ -797,7 +806,7 @@ private struct WebsiteSurfaceView: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.85)))
             }
         }
-        .animation(.easeInOut(duration: 0.18), value: showClose)
+        .animation(.easeInOut(duration: 0.18), value: hover.showClose)
     }
 }
 
@@ -809,9 +818,7 @@ private struct NativeWidgetView: View {
     let onClose: () -> Void
     private let ink = Color.white.opacity(0.92)
 
-    @State private var nearMoveHandle = false
-    @State private var nearResizeHandle = false
-    @State private var showClose = false
+    @StateObject private var hover = HoverState()
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -821,13 +828,13 @@ private struct NativeWidgetView: View {
                 .frame(width: widget.size.width, height: widget.size.height)
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 23))
                 .overlay(RoundedRectangle(cornerRadius: 23).stroke(.white.opacity(0.18), lineWidth: 1))
-                .onHover { showClose = $0 }
+                .onHover { v in hover.showClose = v }
                 // Move bar — bottom center, proximity-based
                 .overlay(alignment: .bottom) {
-                    Capsule().fill(.white.opacity(nearMoveHandle ? 0.92 : 0))
+                    Capsule().fill(.white.opacity(hover.nearMove ? 0.92 : 0))
                         .frame(width: 54, height: 5).padding(.bottom, 10)
                         .frame(width: 100, height: 38).contentShape(Rectangle())
-                        .onHover { nearMoveHandle = $0 }
+                        .onHover { v in hover.nearMove = v }
                         .gesture(DragGesture(minimumDistance: 1).onChanged { v in
                             if widget.dragOrigin == nil { widget.dragOrigin = widget.center }
                             guard let o = widget.dragOrigin else { return }
@@ -835,26 +842,26 @@ private struct NativeWidgetView: View {
                             withTransaction(tx) { widget.center = CGPoint(x: o.x + v.translation.width, y: o.y + v.translation.height) }
                             widget.onGeometryChange?()
                         }.onEnded { _ in widget.dragOrigin = nil })
-                        .animation(.easeInOut(duration: 0.16), value: nearMoveHandle)
+                        .animation(.easeInOut(duration: 0.16), value: hover.nearMove)
                 }
                 // Resize corner — bottom right, proximity-based
                 .overlay(alignment: .bottomTrailing) {
                     RoundedResizeCorner()
-                        .stroke(.white.opacity(nearResizeHandle ? 0.9 : 0), style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
+                        .stroke(.white.opacity(hover.nearResize ? 0.9 : 0), style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
                         .frame(width: 30, height: 30).padding(6).contentShape(Rectangle())
-                        .onHover { nearResizeHandle = $0 }
+                        .onHover { v in hover.nearResize = v }
                         .gesture(DragGesture(minimumDistance: 1).onChanged { v in
                             if widget.resizeOrigin == nil { widget.resizeOrigin = widget.size }
                             guard let o = widget.resizeOrigin else { return }
                             var tx = Transaction(); tx.animation = nil
                             withTransaction(tx) { widget.size = CGSize(width: max(190, o.width + v.translation.width), height: max(150, o.height + v.translation.height)) }
                         }.onEnded { _ in widget.resizeOrigin = nil })
-                        .animation(.easeInOut(duration: 0.16), value: nearResizeHandle)
+                        .animation(.easeInOut(duration: 0.16), value: hover.nearResize)
                 }
                 .shadow(color: .black.opacity(0.36), radius: 28, y: 14)
 
             // Remove button
-            if showClose {
+            if hover.showClose {
                 Button(action: onClose) {
                     Image(systemName: "xmark")
                         .font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
@@ -864,7 +871,7 @@ private struct NativeWidgetView: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.85)))
             }
         }
-        .animation(.easeInOut(duration: 0.18), value: showClose)
+        .animation(.easeInOut(duration: 0.18), value: hover.showClose)
     }
 
     @ViewBuilder private var widgetContent: some View {
