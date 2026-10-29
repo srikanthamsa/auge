@@ -2215,14 +2215,15 @@ private final class WebsiteHandleView: NSView {
         super.draw(dirtyRect)
 
         if isNearClose {
-            let circle = NSBezierPath(ovalIn: NSRect(x: bounds.maxX - 36, y: 8, width: 28, height: 28))
-            NSColor.black.withAlphaComponent(0.72).setFill()
-            circle.fill()
-            NSColor.white.withAlphaComponent(0.95).setStroke()
-            let x = NSBezierPath(); x.lineWidth = 1.8; x.lineCapStyle = .round
-            x.move(to: CGPoint(x: bounds.maxX - 28, y: 16)); x.line(to: CGPoint(x: bounds.maxX - 16, y: 28))
-            x.move(to: CGPoint(x: bounds.maxX - 16, y: 16)); x.line(to: CGPoint(x: bounds.maxX - 28, y: 28))
-            x.stroke()
+            let rect = NSRect(x: bounds.maxX - 34, y: 10, width: 24, height: 24)
+            if let glyph = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Close")?
+                .withSymbolConfiguration(.init(pointSize: 22, weight: .regular)) {
+                NSColor.black.withAlphaComponent(0.55).setFill()
+                NSBezierPath(ovalIn: rect.insetBy(dx: -3, dy: -3)).fill()
+                glyph.isTemplate = true
+                NSColor.white.withAlphaComponent(0.9).set()
+                glyph.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+            }
         }
 
         guard isNearControl else { return }
@@ -2702,17 +2703,21 @@ private struct SeeOverlay: View {
         HStack(spacing: 14) {
             Image(systemName: "eye.fill")
                 .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
-                .frame(width: 34, height: 34).background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 11))
-            VStack(alignment: .leading, spacing: 1) {
-                Text("SEE").font(.system(size: 12, weight: .bold, design: .rounded)).tracking(2.6)
-                Text("A little space for what matters").font(.system(size: 11, weight: .medium, design: .rounded)).foregroundStyle(dim)
+                .frame(width: 34, height: 34)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(.white.opacity(0.08), lineWidth: 0.5))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("SEE").font(.system(size: 12, weight: .semibold)).tracking(2.4)
+                Text("A little space for what matters")
+                    .font(.system(size: 11, weight: .regular)).foregroundStyle(.secondary)
             }
             Spacer()
             HStack(spacing: 8) {
                 let count = model.websites.count + model.widgets.count
                 if count > 0 {
                     Text("\(count) \(count == 1 ? "surface" : "surfaces")")
-                        .font(.system(size: 11, weight: .medium, design: .rounded)).foregroundStyle(dim)
+                        .font(.system(size: 11, weight: .regular)).foregroundStyle(.tertiary)
                 }
                 Button {
                     debugLog("topBar add pressed")
@@ -2721,14 +2726,19 @@ private struct SeeOverlay: View {
                     }
                 } label: {
                     Label("Add", systemImage: "plus")
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .padding(.horizontal, 13).padding(.vertical, 9)
-                        .background(.white.opacity(0.13), in: Capsule())
+                        .font(.system(size: 12, weight: .semibold))
+                        .padding(.horizontal, 13).padding(.vertical, 8)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .overlay(Capsule().strokeBorder(.white.opacity(0.09), lineWidth: 0.5))
                         .contentShape(Capsule())
                 }.buttonStyle(.plain)
                 Button(action: onClose) {
-                    Image(systemName: "xmark").font(.system(size: 12, weight: .semibold))
-                        .frame(width: 34, height: 34).background(.white.opacity(0.13), in: Circle())
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 22, weight: .regular))
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 34, height: 34)
+                        .contentShape(Circle())
                 }.buttonStyle(.plain).help("Close See")
             }
         }.foregroundStyle(white)
@@ -2742,7 +2752,7 @@ private struct SeeOverlay: View {
             Spacer()
             Text("Esc  Close")
         }
-        .font(.system(size: 11, weight: .medium, design: .rounded)).foregroundStyle(dim)
+        .font(.system(size: 11, weight: .regular)).foregroundStyle(.tertiary)
     }
 }
 
@@ -2807,24 +2817,29 @@ private struct WebsiteSurfaceView: View {
         WebsiteView(site: site, onHoverChange: { _ in }, onClose: onClose, onPick: onPick)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .frame(width: site.size.width, height: site.size.height)
-            .clipShape(RoundedRectangle(cornerRadius: 14))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             .overlay {
                 if let shot = site.chromeSnapshot {
                     Image(nsImage: shot)
                         .resizable().aspectRatio(contentMode: .fill)
                         .frame(width: site.size.width, height: site.size.height)
-                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                         .allowsHitTesting(false)
                 }
             }
             .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(.white.opacity(0.07), lineWidth: 0.5)
+                    .allowsHitTesting(false)
+            }
+            .overlay {
                 if site.isPickingElements {
-                    RoundedRectangle(cornerRadius: 14)
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
                         .stroke(Color.red.opacity(0.85), style: StrokeStyle(lineWidth: 2, dash: [7, 5]))
                         .allowsHitTesting(false)
                 }
             }
-            .shadow(color: .black.opacity(isFocused ? 0.38 : 0.22), radius: isFocused ? 30 : 18, y: 12)
+            .shadow(color: .black.opacity(isFocused ? 0.34 : 0.22), radius: isFocused ? 34 : 22, y: 14)
             .onTapGesture(perform: onFocus)
     }
 }
@@ -2998,13 +3013,19 @@ private struct NativeWidgetView: View {
                 .padding(20)
                 .frame(width: widget.size.width, height: widget.size.height)
                 .background {
-                    BehindWindowGlass()
-                        .clipShape(RoundedRectangle(cornerRadius: 23, style: .continuous))
+                    ZStack {
+                        BehindWindowGlass()
+                        // Reflective tint lifts the widget off the workspace.
+                        LinearGradient(colors: [.white.opacity(0.14), .white.opacity(0.03)],
+                                       startPoint: .topLeading, endPoint: .bottomTrailing)
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                 }
-                .overlay(RoundedRectangle(cornerRadius: 23).stroke(.white.opacity(0.18), lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
                 .compositingGroup()
-                .shadow(color: .black.opacity(widget.isDragging ? 0.24 : 0.36),
-                        radius: widget.isDragging ? 16 : 28, y: widget.isDragging ? 6 : 14)
+                .shadow(color: .black.opacity(widget.isDragging ? 0.22 : 0.28),
+                        radius: widget.isDragging ? 18 : 32, y: widget.isDragging ? 8 : 16)
                 // Move bar drawn in SwiftUI (visual only, hits handled by WidgetDragView)
                 .overlay(alignment: .bottom) {
                     Capsule().fill(.white.opacity(hover.nearMove ? 0.88 : 0))
@@ -3063,38 +3084,61 @@ private struct NativeWidgetView: View {
         switch widget.kind {
         case .clock:
             TimelineView(.periodic(from: .now, by: 1)) { ctx in
-                VStack(alignment: .center, spacing: 7) {
-                    Text(ctx.date, format: .dateTime.weekday(.wide).month(.wide).day())
-                        .font(.system(size: 13, weight: .medium)).foregroundStyle(ink.opacity(0.62))
+                VStack(alignment: .center, spacing: 8) {
                     Text(ctx.date, format: .dateTime.hour().minute())
-                        .font(.system(size: 58, weight: .heavy, design: .rounded)).monospacedDigit().foregroundStyle(ink)
-                    Text("LOCAL TIME").font(.system(size: 10, weight: .bold)).tracking(2).foregroundStyle(ink.opacity(0.42))
+                        .font(.system(size: 54, weight: .semibold, design: .default))
+                        .monospacedDigit().foregroundStyle(ink)
+                    VStack(spacing: 3) {
+                        Text(ctx.date, format: .dateTime.weekday(.wide).month(.wide).day())
+                            .font(.system(size: 12.5, weight: .medium)).foregroundStyle(ink.opacity(0.62))
+                        Text("LOCAL TIME").font(.system(size: 9.5, weight: .semibold)).tracking(1.8)
+                            .foregroundStyle(ink.opacity(0.38))
+                    }
                 }
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
         case .calendar:
-            VStack(alignment: .leading, spacing: 14) {
-                Text(Date.now, format: .dateTime.month(.wide).year()).font(.system(size: 19, weight: .semibold)).foregroundStyle(ink)
+            VStack(alignment: .leading, spacing: 12) {
+                Text(Date.now, format: .dateTime.month(.wide).year())
+                    .font(.system(size: 18, weight: .semibold)).foregroundStyle(ink)
                 let symbols = Calendar.current.veryShortStandaloneWeekdaySymbols
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 7), spacing: 10) {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 7), spacing: 6) {
                     ForEach(Array(symbols.enumerated()), id: \.offset) { _, day in
-                        Text(day).font(.system(size: 10, weight: .bold)).foregroundStyle(ink.opacity(0.45))
+                        Text(day).font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(ink.opacity(0.40))
+                            .frame(height: 16)
                     }
                     ForEach(Array(Calendar.current.range(of: .day, in: .month, for: .now) ?? 1..<29), id: \.self) { day in
                         let today = Calendar.current.component(.day, from: .now) == day
-                        Text("\(day)").font(.system(size: 12, weight: today ? .bold : .regular))
-                            .foregroundStyle(today ? Color.black : ink.opacity(0.82))
-                            .frame(width: 28, height: 28)
-                            .background(today ? Color.white : .clear, in: Circle())
+                        Text("\(day)")
+                            .font(.system(size: 12, weight: today ? .semibold : .regular))
+                            .monospacedDigit()
+                            .foregroundStyle(today ? Color.white : ink.opacity(0.85))
+                            .frame(width: 26, height: 26)
+                            .background {
+                                if today {
+                                    Circle().fill(Color.accentColor)
+                                }
+                            }
+                            .frame(height: 26)
                     }
                 }
             }
         case .note:
-            VStack(alignment: .leading, spacing: 10) {
-                Label("Quick Note", systemImage: "note.text").font(.system(size: 14, weight: .semibold)).foregroundStyle(ink.opacity(0.82))
-                TextEditor(text: $widget.note).scrollContentBackground(.hidden).font(.system(size: 15)).foregroundStyle(ink).background(.clear)
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Quick Note", systemImage: "note.text")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(ink.opacity(0.72))
+                TextEditor(text: $widget.note)
+                    .scrollContentBackground(.hidden)
+                    .font(.system(size: 14.5))
+                    .lineSpacing(2)
+                    .foregroundStyle(ink.opacity(0.94))
+                    .background(.clear)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         case .timer:
             TimerView(widget: widget, ink: ink)
         case .battery:
@@ -3289,19 +3333,22 @@ private struct SystemStatsView: View {
     }
 
     private func row(_ title: String, value: Double, detail: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(title).font(.system(size: 12, weight: .semibold)).foregroundStyle(ink.opacity(0.75))
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(title).font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(ink.opacity(0.60))
                 Spacer()
-                Text(detail).font(.system(size: 12, weight: .semibold)).monospacedDigit().foregroundStyle(ink.opacity(0.85))
+                Text(detail).font(.system(size: 11.5, weight: .semibold)).monospacedDigit()
+                    .foregroundStyle(ink.opacity(0.80))
             }
-            Capsule().fill(.white.opacity(0.14)).frame(height: 6)
-                .overlay(alignment: .leading) {
-                    GeometryReader { geo in
-                        Capsule().fill(ink.opacity(0.85))
-                            .frame(width: max(4, geo.size.width * CGFloat(min(1, value))))
-                    }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.white.opacity(0.12))
+                    Capsule().fill(ink.opacity(0.82))
+                        .frame(width: max(3, geo.size.width * CGFloat(min(1, max(0, value)))))
                 }
+            }
+            .frame(height: 5)
         }
     }
 }
@@ -3476,17 +3523,17 @@ private final class MenuHover: ObservableObject {
 /// macOS-style frosted panel: a real blur of what is behind the panel.
 private struct GlassMenuBackground: View {
     var body: some View {
-        RoundedRectangle(cornerRadius: 14, style: .continuous)
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
             .fill(.ultraThinMaterial)
             .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color.white.opacity(0.05))
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color.white.opacity(0.04))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(Color.white.opacity(0.16), lineWidth: 0.8)
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.10), lineWidth: 0.5)
             )
-            .shadow(color: .black.opacity(0.32), radius: 20, y: 9)
+            .shadow(color: .black.opacity(0.28), radius: 26, y: 12)
     }
 }
 
@@ -3548,13 +3595,20 @@ private struct WidgetPickerOverlay: View {
                         case .widgets: widgetContent
                         }
                     }
-                    .padding(.horizontal, 18).padding(.bottom, 18)
+                    .padding(.horizontal, 22).padding(.bottom, 22)
                 }
             }
             .frame(width: 660, height: 438)
-            .background(Color(red: 0.10, green: 0.10, blue: 0.12).opacity(0.96), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(.white.opacity(0.16), lineWidth: 1))
-            .shadow(color: .black.opacity(0.44), radius: 34, y: 16)
+            .background {
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .fill(Color.black.opacity(0.16)))
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(.white.opacity(0.10), lineWidth: 0.5))
+            .shadow(color: .black.opacity(0.34), radius: 40, y: 20)
             .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
             .onTapGesture { }
         }
@@ -3594,17 +3648,20 @@ private struct WidgetPickerOverlay: View {
             ForEach(NativeWidgetKind.allCases) { kind in
                 Button { onAddWidget(kind) } label: {
                     HStack(spacing: 12) {
-                        Image(systemName: kind.symbol).font(.system(size: 18, weight: .medium))
-                            .frame(width: 42, height: 42).background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 11))
+                        Image(systemName: kind.symbol).font(.system(size: 17, weight: .regular))
+                            .frame(width: 40, height: 40)
+                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                         VStack(alignment: .leading, spacing: 3) {
                             Text(kind.rawValue).font(.system(size: 13, weight: .semibold))
-                            Text(kind.summary).font(.system(size: 11)).foregroundStyle(.white.opacity(0.48))
+                            Text(kind.summary).font(.system(size: 11)).foregroundStyle(.secondary)
                         }
                         Spacer(minLength: 0)
                     }
-                    .foregroundStyle(.white.opacity(0.9)).padding(10)
-                    .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 13))
-                    .overlay(RoundedRectangle(cornerRadius: 13).stroke(.white.opacity(0.09), lineWidth: 1))
+                    .foregroundStyle(.white.opacity(0.92)).padding(12)
+                    .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(.white.opacity(0.08), lineWidth: 0.5))
+                    .shadow(color: .black.opacity(0.16), radius: 10, y: 4)
                 }.buttonStyle(.plain)
             }
         }
@@ -3789,6 +3846,16 @@ private struct ConfigureWidgetOverlay: View {
                 .onTapGesture { if !site.isPickingElements { onDone() } }
             panel
                 .frame(width: min(460, max(320, 1710 * 0.3)))
+                .background {
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                        .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous)
+                            .fill(Color.black.opacity(0.18)))
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .strokeBorder(.white.opacity(0.10), lineWidth: 0.5))
+                .shadow(color: .black.opacity(0.32), radius: 34, y: 18)
                 .padding(.trailing, 44)
                 .transition(.opacity.combined(with: .scale(scale: 0.98)))
         }
@@ -3813,9 +3880,12 @@ private struct ConfigureWidgetOverlay: View {
                 }
                 Spacer(minLength: 8)
                 Button(action: onDone) {
-                    Image(systemName: "xmark").font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.7))
-                        .frame(width: 24, height: 24).background(.white.opacity(0.1), in: Circle())
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 19, weight: .regular))
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 26, height: 26)
+                        .contentShape(Circle())
                 }.buttonStyle(.plain)
             }
             .padding(.horizontal, 18).padding(.top, 16).padding(.bottom, 14)
