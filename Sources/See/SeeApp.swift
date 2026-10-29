@@ -223,7 +223,8 @@ final class WorkspaceInteractionView: NSView {
                 debugLog("right down at \(point)")
                 self.onRightClick?(point); return nil
             case .leftMouseDown:
-                debugLog("left down at \(point) key=\(self.window?.isKeyWindow == true) active=\(NSApp.isActive)")
+                if MenuHover.shared.invoke(at: point) { return nil }
+                debugLog("left down at \(point) key=\(self.window?.isKeyWindow == true) active=\(NSApp.isActive) menuFrame=\(String(describing: self.contextMenuFrame?())) inMenu=\(self.contextMenuFrame?().map { $0.contains(point) } ?? false)")
                 if let menuFrame = self.contextMenuFrame?(), !menuFrame.contains(point) { self.onDismiss?(point) }
                 else if self.contextMenuFrame?() == nil { self.onDismiss?(point) }
                 // Only start drag-to-create on empty workspace
@@ -312,7 +313,9 @@ private final class OverlayModel: ObservableObject {
     @Published var widgets: [NativeWidgetSurface] = []
     @Published var focusedID: UUID?
     @Published var hasPlacedInitialSite = false
-    @Published var contextMenuPoint: CGPoint?
+    @Published var contextMenuPoint: CGPoint? {
+        didSet { if contextMenuPoint == nil { MenuHover.shared.clear("ws:") } }
+    }
     @Published var showingWidgetPicker = false
     @Published var pendingPickerForRect: CGRect? = nil   // for drag-to-create
     @Published var pickerCategory: WidgetPickerCategory = .websites
@@ -323,7 +326,9 @@ private final class OverlayModel: ObservableObject {
     @Published var backgroundDim: Double = 0.80
     @Published var confirmingRemoveAll = false
     @Published var dragCreatingRect: CGRect = .null      // live drawing rect
-    @Published var surfaceMenu: SurfaceMenuTarget?
+    @Published var surfaceMenu: SurfaceMenuTarget? {
+        didSet { if surfaceMenu == nil { MenuHover.shared.clear("sf:") } }
+    }
     /// The surface whose settings panel is open. Opening it slides that surface
     /// to the left so the panel can sit on the right without covering it (the
     /// Peek arrangement); closing puts it back where it was.
@@ -341,15 +346,26 @@ private final class OverlayModel: ObservableObject {
     private var configureOrigins: [UUID: CGPoint] = [:]
     private var configureSizes: [UUID: CGSize] = [:]
 
+    /// Settings panel geometry, shared with the slot maths so the surface always
+    /// lands right next to the panel instead of across a half-screen gap.
+    static func configurePanelFrame(in size: CGSize) -> CGRect {
+        let width = min(460, max(320, size.width * 0.3))
+        return CGRect(x: size.width - 44 - width, y: 0, width: width, height: size.height)
+    }
+
     private func configureSlot(for site: WebsiteSurface) -> (center: CGPoint, size: CGSize) {
         let size = workspaceSize
         let usable = CGRect(x: 34, y: 92, width: max(240, size.width - 68), height: max(240, size.height - 168))
-        let leftRegion = CGRect(x: usable.minX, y: usable.minY,
-                                width: usable.width * 0.52 - 10, height: usable.height)
+        let panel = Self.configurePanelFrame(in: size)
+        let gap: CGFloat = 34
+        let region = CGRect(x: usable.minX, y: usable.minY,
+                            width: max(240, panel.minX - gap - usable.minX),
+                            height: usable.height)
         var w = site.size.width, h = site.size.height
-        let fit = min(1, min((leftRegion.width - 24) / max(1, w), (leftRegion.height - 24) / max(1, h)))
+        let fit = min(1, min((region.width - 24) / max(1, w), (region.height - 24) / max(1, h)))
         w *= fit; h *= fit
-        return (CGPoint(x: leftRegion.midX, y: leftRegion.midY), CGSize(width: w, height: h))
+        // Sit against the panel, not in the middle of the leftover space.
+        return (CGPoint(x: region.maxX - 12 - w / 2, y: region.midY), CGSize(width: w, height: h))
     }
 
     private func makeRoomForConfigure(_ site: WebsiteSurface) {
@@ -358,6 +374,9 @@ private final class OverlayModel: ObservableObject {
             configureOrigins[site.id] = site.center
             configureSizes[site.id] = site.size
         }
+        // The page must be live, not the still image that covered it while a
+        // menu was open, or hiding and restoring elements would not show.
+        site.exitChromeMode()
         withAnimation(.spring(response: 0.36, dampingFraction: 0.82)) {
             site.size = slot.size
             site.center = slot.center
@@ -2242,9 +2261,10 @@ private struct SeeOverlay: View {
                                           site.addHiddenSelector(selector)
                                       })
                         .scaleEffect(appeared ? 1 : 0.97)
-                        .opacity(appeared ? 1 : 0)
+                        .opacity(surfaceOpacity(appeared ? 1 : 0, for: site))
                         .animation(.spring(response: 0.26, dampingFraction: 0.74)
                             .delay(Double(index) * 0.012), value: appeared)
+                        .animation(.easeOut(duration: 0.18), value: model.configuring?.id)
                         .zIndex(model.focusedID == site.id ? 2 : Double(index))
                         .transition(.asymmetric(
                             insertion: .opacity.combined(with: .scale(scale: 0.94)),
@@ -2255,7 +2275,7 @@ private struct SeeOverlay: View {
                 ForEach(Array(model.widgets.enumerated()), id: \.element.id) { index, widget in
                     PlacedWidgetView(widget: widget, onClose: { model.removeWidget(widget) })
                         .scaleEffect(appeared ? 1 : 0.95)
-                        .opacity(appeared ? 1 : 0)
+                        .opacity(model.configuring == nil ? (appeared ? 1 : 0) : 0)
                         .animation(.spring(response: 0.26, dampingFraction: 0.74)
                             .delay(Double(model.websites.count + index) * 0.012), value: appeared)
                         .zIndex(3 + Double(index))
@@ -2344,7 +2364,11 @@ private struct SeeOverlay: View {
                 for site in model.websites {
                     // A surface being zapped must stay live: the snapshot would
                     // freeze the page the user is clicking on.
-                    if visible && !site.isPickingElements { site.enterChromeMode() } else { site.exitChromeMode() }
+                    if visible && !site.isPickingElements && model.configuring !== site {
+                        site.enterChromeMode()
+                    } else {
+                        site.exitChromeMode()
+                    }
                 }
             }
             .onAppear {
@@ -2527,6 +2551,13 @@ private struct SeeOverlay: View {
             return CGRect(origin: o, size: menuSizes.surface)
         }
         return nil
+    }
+
+    /// While a settings panel is open only the surface it belongs to stays on
+    /// screen; everything else steps aside so the page is easy to work with.
+    private func surfaceOpacity(_ base: Double, for site: WebsiteSurface) -> Double {
+        guard let target = model.configuring else { return base }
+        return target === site ? base : 0
     }
 
     private func isPointOverSurface(_ pt: CGPoint, size: CGSize) -> Bool {
@@ -2956,7 +2987,10 @@ private struct WorkspaceContextMenu: View {
                             in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                 .background(GeometryReader { proxy in
                     Color.clear
-                        .onAppear { DispatchQueue.main.async { hover.register(key, proxy.frame(in: .global)) } }
+                        .onAppear {
+                            hover.setAction(key, action)
+                            DispatchQueue.main.async { hover.register(key, proxy.frame(in: .global)) }
+                        }
                         .onChange(of: proxy.frame(in: .global)) { _, new in DispatchQueue.main.async { hover.register(key, new) } }
                 })
         }
@@ -2974,13 +3008,34 @@ private final class MenuHover: ObservableObject {
 
     private var frames: [String: CGRect] = [:]
 
+    private var actions: [String: () -> Void] = [:]
+
     func register(_ id: String, _ frame: CGRect) {
         if frame.width < 2 || frame.height < 2 { return }
         if frames[id] != frame { frames[id] = frame }
     }
 
+    func setAction(_ id: String, _ action: @escaping () -> Void) {
+        actions[id] = action
+    }
+
+    /// Runs the row under a click on mouse-down. SwiftUI buttons only fire on
+    /// mouse-up, and the first click of a session can be lost to a re-render,
+    /// which is why a menu row used to need a second click.
+    func invoke(at point: CGPoint) -> Bool {
+        for (id, frame) in frames where frame.contains(point) {
+            guard let action = actions[id] else { continue }
+            row = nil
+            action()
+            return true
+        }
+        return false
+    }
+
     func clear(_ prefix: String) {
-        for key in frames.keys where key.hasPrefix(prefix) { frames.removeValue(forKey: key) }
+        for key in frames.keys where key.hasPrefix(prefix) {
+            frames.removeValue(forKey: key); actions.removeValue(forKey: key)
+        }
         if let row, row.hasPrefix(prefix) { self.row = nil }
     }
 
@@ -3263,7 +3318,10 @@ private struct SurfaceContextMenu: View {
                             in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                 .background(GeometryReader { proxy in
                     Color.clear
-                        .onAppear { DispatchQueue.main.async { hover.register(key, proxy.frame(in: .global)) } }
+                        .onAppear {
+                            hover.setAction(key, action)
+                            DispatchQueue.main.async { hover.register(key, proxy.frame(in: .global)) }
+                        }
                         .onChange(of: proxy.frame(in: .global)) { _, new in DispatchQueue.main.async { hover.register(key, new) } }
                 })
         }
@@ -3288,7 +3346,7 @@ private struct ConfigureWidgetOverlay: View {
                 .allowsHitTesting(!site.isPickingElements)
                 .onTapGesture { if !site.isPickingElements { onDone() } }
             panel
-                .frame(width: 460)
+                .frame(width: min(460, max(320, 1710 * 0.3)))
                 .padding(.trailing, 44)
                 .transition(.opacity.combined(with: .scale(scale: 0.98)))
         }
@@ -3383,6 +3441,10 @@ private struct ConfigureWidgetOverlay: View {
                                         site.config.hiddenSelectors.removeAll { $0 == selector }
                                         debugLog("unhide \(selector)")
                                         site.applyTuning(reload: false)
+                                        let quoted = "\(selector.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'"))"
+                                        site.webView?.evaluateJavaScript("var e=document.querySelectorAll('\(quoted)'); e.length + ' display=' + (e[0] ? getComputedStyle(e[0]).display : 'not-found') + ' sheet=' + ((document.getElementById('__see_hide')||{}).textContent||'').length") { value, _ in
+                                            debugLog("after unhide: \(String(describing: value))")
+                                        }
                                     } label: {
                                         Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
                                             .foregroundStyle(.white.opacity(0.6))
