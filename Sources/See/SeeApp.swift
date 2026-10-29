@@ -1437,20 +1437,23 @@ private enum PageScripts {
     /// that ended while the page was busy can never leave a red box behind.
     static let clearPicker = """
     (function(){
-      if (window.__seePickerActive) { return; }
-      ['__see_zap_box', '__see_zap_label'].forEach(function(id){
-        var el = document.getElementById(id);
-        if (el) { el.remove(); }
-      });
-      document.documentElement.style.cursor = '';
-      var again = function(){
+      function scrub(){
         if (window.__seePickerActive) { return; }
-        ['__see_zap_box', '__see_zap_label'].forEach(function(id){
-          var el = document.getElementById(id);
-          if (el) { el.remove(); }
-        });
-      };
-      setTimeout(again, 300); setTimeout(again, 1500);
+        var strays = document.querySelectorAll('#__see_zap_box, #__see_zap_label');
+        for (var i = 0; i < strays.length; i++) { strays[i].remove(); }
+        if (document.documentElement.style.cursor === 'crosshair') {
+          document.documentElement.style.cursor = '';
+        }
+      }
+      scrub();
+      setTimeout(scrub, 300);
+      setTimeout(scrub, 1500);
+      // Whatever painted an overlay without a live session, it must not stay.
+      if (!window.__seePickerScrubber) {
+        window.__seePickerScrubber = new MutationObserver(scrub);
+        window.__seePickerScrubber.observe(document.documentElement,
+          { childList: true, subtree: true });
+      }
     })();
     """
 
@@ -1651,8 +1654,10 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         controller.addUserScript(WKUserScript(source: PageScripts.cursorProbe,
                                               injectionTime: .atDocumentEnd, forMainFrameOnly: false))
         if isPickingElements {
+            // Main frame only: `stopPicker` is evaluated on the main frame, so an
+            // overlay created inside an iframe could never be removed.
             controller.addUserScript(WKUserScript(source: PageScripts.picker,
-                                                  injectionTime: .atDocumentEnd, forMainFrameOnly: false))
+                                                  injectionTime: .atDocumentEnd, forMainFrameOnly: true))
         } else {
             controller.addUserScript(WKUserScript(source: PageScripts.clearPicker,
                                                   injectionTime: .atDocumentEnd, forMainFrameOnly: false))
@@ -1679,10 +1684,12 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
             return
         }
         isPickingElements = picking
+        if picking { exitChromeMode() }
         webHost?.refreshHandles()
         debugLog("setPicking \(picking) hidden=\(String(describing: webView?.isHidden))")
         guard let webView else { return }
         installUserScripts(in: webView)
+        if !picking { webView.evaluateJavaScript(PageScripts.clearPicker, completionHandler: nil) }
         webView.evaluateJavaScript(picking ? PageScripts.picker : PageScripts.stopPicker) { [weak webView] _, _ in
             guard !picking else { return }
             webView?.evaluateJavaScript("(document.getElementById('__see_zap_box') ? 'box ' : '') + (document.getElementById('__see_zap_label') ? 'label ' : '') + '|' + document.documentElement.style.cursor") { value, _ in
@@ -1921,7 +1928,6 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate {
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         let local = convert(point, from: superview)
-        if site.isPickingElements, doneRect.contains(local) { return self }
         if moveRect.contains(local) || resizeRect.contains(local) || closeRect.contains(local) { return self }
         return super.hitTest(point)
     }
@@ -1950,12 +1956,6 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate {
 
     override func mouseDown(with event: NSEvent) {
         let pt = convert(event.locationInWindow, from: nil)
-        if site.isPickingElements, doneRect.contains(pt) {
-            debugLog("zapping done pressed")
-            site.setPicking(false)
-            handles.needsDisplay = true
-            return
-        }
         if closeRect.contains(pt) { activeClose = true; return }
         activeHandle = moveRect.contains(pt) ? .move : (resizeRect.contains(pt) ? .resize : nil)
         debugLog("site mouseDown pt=\(pt) moveRect=\(moveRect) resizeRect=\(resizeRect) handle=\(String(describing: activeHandle)) bounds=\(bounds)")
@@ -1982,13 +1982,6 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate {
     private var activeClose = false
 
     // Proximity zones: draw targets are small; grab zone is generous
-    /// Same pill the handle view draws while zapping; the host owns its hit area
-    /// because the web view sits above the handle view for page clicks.
-    private var doneRect: CGRect {
-        let width = min(260, max(180, bounds.width - 40))
-        return CGRect(x: bounds.midX - width / 2, y: 12, width: width, height: 34)
-    }
-
     func refreshHandles() { handles.needsDisplay = true }
 
     private var moveRect: CGRect { CGRect(x: bounds.midX - 90, y: bounds.height - 72, width: 180, height: 72) }
@@ -2020,37 +2013,6 @@ private final class WebsiteHandleView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-
-        if site.isPickingElements {
-            let rect = doneRect
-            let pill = NSBezierPath(roundedRect: rect, xRadius: rect.height / 2, yRadius: rect.height / 2)
-            NSColor(calibratedWhite: 0.12, alpha: 0.92).setFill()
-            pill.fill()
-            NSColor.white.withAlphaComponent(0.15).setStroke()
-            pill.lineWidth = 1
-            pill.stroke()
-
-            let dot = NSBezierPath(ovalIn: NSRect(x: rect.minX + 12, y: rect.midY - 4, width: 8, height: 8))
-            NSColor.systemRed.withAlphaComponent(0.95).setFill()
-            dot.fill()
-
-            let doneBox = NSRect(x: rect.maxX - 64, y: rect.minY + 6,
-                                 width: 56, height: rect.height - 12)
-            let done = NSBezierPath(roundedRect: doneBox, xRadius: doneBox.height / 2, yRadius: doneBox.height / 2)
-            NSColor.white.withAlphaComponent(0.18).setFill()
-            done.fill()
-
-            let font = NSFont.systemFont(ofSize: 11.5, weight: .medium)
-            ("Zapping — click to hide" as NSString).draw(
-                at: CGPoint(x: rect.minX + 26, y: rect.minY + (rect.height - 15) / 2),
-                withAttributes: [.font: font,
-                                 .foregroundColor: NSColor.white.withAlphaComponent(0.88)])
-            let doneFont = NSFont.systemFont(ofSize: 11.5, weight: .semibold)
-            let doneText = "Done" as NSString
-            let size = doneText.size(withAttributes: [.font: doneFont])
-            doneText.draw(at: CGPoint(x: doneBox.midX - size.width / 2, y: doneBox.midY - size.height / 2),
-                          withAttributes: [.font: doneFont, .foregroundColor: NSColor.white])
-        }
 
         if isNearClose {
             let circle = NSBezierPath(ovalIn: NSRect(x: bounds.maxX - 36, y: 8, width: 28, height: 28))
@@ -2317,7 +2279,9 @@ private struct SeeOverlay: View {
             }
             .onChange(of: model.chromeVisible) { _, visible in
                 for site in model.websites {
-                    if visible { site.enterChromeMode() } else { site.exitChromeMode() }
+                    // A surface being zapped must stay live: the snapshot would
+                    // freeze the page the user is clicking on.
+                    if visible && !site.isPickingElements { site.enterChromeMode() } else { site.exitChromeMode() }
                 }
             }
             .onAppear {
@@ -3254,7 +3218,9 @@ private struct ConfigureWidgetOverlay: View {
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.10).ignoresSafeArea().onTapGesture(perform: onDone)
+            Color.black.opacity(0.10).ignoresSafeArea()
+                .allowsHitTesting(!site.isPickingElements)
+                .onTapGesture { if !site.isPickingElements { onDone() } }
             panel
                 .frame(width: 460)
                 .transition(.opacity.combined(with: .scale(scale: 0.98)))
@@ -3319,16 +3285,25 @@ private struct ConfigureWidgetOverlay: View {
                         HStack {
                             Text("Hide page elements").font(.system(size: 13, weight: .medium)).foregroundStyle(ink)
                             Spacer()
-                            Button(action: onSelectElements) {
-                                Text("Select on page…").font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(ink)
+                            Button {
+                                if site.isPickingElements { site.setPicking(false) } else { onSelectElements() }
+                            } label: {
+                                Text(site.isPickingElements ? "Cancel" : "Select on page…")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(site.isPickingElements ? Color(red: 0.42, green: 0.72, blue: 1.0) : ink)
                                     .padding(.horizontal, 11).padding(.vertical, 6)
                                     .background(.white.opacity(0.12), in: Capsule())
                             }.buttonStyle(.plain)
                         }
+                        if site.isPickingElements {
+                            Text("Click elements on the page to hide them. Press Esc to exit.")
+                                .font(.system(size: 11)).foregroundStyle(Color(red: 0.42, green: 0.72, blue: 1.0).opacity(0.9))
+                        }
                         if site.config.hiddenSelectors.isEmpty {
-                            Text("Nothing hidden yet. Click any element on the page to hide it.")
-                                .font(.system(size: 11)).foregroundStyle(dim)
+                            if !site.isPickingElements {
+                                Text("Nothing hidden yet. Click any element on the page to hide it.")
+                                    .font(.system(size: 11)).foregroundStyle(dim)
+                            }
                         } else {
                             ForEach(site.config.hiddenSelectors, id: \.self) { selector in
                                 HStack(spacing: 8) {
@@ -3512,7 +3487,8 @@ private struct ChromeOverlay: View {
                     ConfigureWidgetOverlay(
                         site: site,
                         onSelectElements: {
-                            withAnimation(.easeOut(duration: 0.16)) { model.configuring = nil }
+                            // Keep the panel open, like Peek: it is the only
+                            // anchor and the only obvious way out of the mode.
                             site.setPicking(true)
                         },
                         onDone: {
