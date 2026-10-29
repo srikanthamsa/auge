@@ -76,23 +76,9 @@ private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         NotificationCenter.default.post(name: .seePeekOpened, object: nil)
-        if let layer = panel.contentView?.layer {
-            layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-            layer.position = CGPoint(x: panel.frame.midX, y: panel.frame.midY)
-            let from = CATransform3DConcat(CATransform3DMakeScale(0.972, 0.972, 1),
-                                           CATransform3DMakeTranslation(0, -14, 0))
-            layer.transform = from
-            layer.opacity = 0
-            CATransaction.begin()
-            CATransaction.setAnimationDuration(0.52)
-            CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(controlPoints: 0.16, 1.0, 0.3, 1.0))
-            layer.transform = CATransform3DIdentity
-            layer.opacity = 1
-            CATransaction.commit()
-        }
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.34
-            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.16, 1.0, 0.3, 1.0)
+            ctx.duration = 0.10
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             panel.animator().alphaValue = 1
         }
         if escapeMonitor == nil {
@@ -107,22 +93,14 @@ private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
     private func hidePanel() {
         guard let panel, panel.isVisible else { return }
         NotificationCenter.default.post(name: .seePeekClosed, object: nil)
-        if let layer = panel.contentView?.layer {
-            CATransaction.begin()
-            CATransaction.setAnimationDuration(0.20)
-            CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeIn))
-            layer.transform = CATransform3DMakeScale(1.015, 1.015, 1)
-            CATransaction.commit()
-        }
         NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.20
+            ctx.duration = 0.09
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
             panel.animator().alphaValue = 0
         }, completionHandler: {
             Task { @MainActor in
                 panel.orderOut(nil)
                 panel.alphaValue = 1
-                panel.contentView?.layer?.transform = CATransform3DIdentity
             }
         })
     }
@@ -280,7 +258,6 @@ private struct SurfaceMenuTarget: Identifiable {
     let id = UUID()
     let site: WebsiteSurface?
     let widget: NativeWidgetSurface?
-    var app: AppMirrorSurface? = nil
     let point: CGPoint
 }
 
@@ -288,7 +265,6 @@ private struct SurfaceMenuTarget: Identifiable {
 private final class OverlayModel: ObservableObject {
     @Published var websites: [WebsiteSurface] = []
     @Published var widgets: [NativeWidgetSurface] = []
-    @Published var apps: [AppMirrorSurface] = []
     @Published var focusedID: UUID?
     @Published var hasPlacedInitialSite = false
     @Published var contextMenuPoint: CGPoint?
@@ -298,6 +274,8 @@ private final class OverlayModel: ObservableObject {
     @Published var pickerSearch = ""
     @Published var workspacePanel: WorkspacePanel?
     @Published var backgroundStyle: WorkspaceBackgroundStyle = .midnight
+    @Published var backgroundGlow: Double = 0.9
+    @Published var backgroundDim: Double = 0.80
     @Published var confirmingRemoveAll = false
     @Published var dragCreatingRect: CGRect = .null      // live drawing rect
     @Published var surfaceMenu: SurfaceMenuTarget?
@@ -321,15 +299,15 @@ private final class OverlayModel: ObservableObject {
     func snapshot() -> WorkspaceSnapshot {
         WorkspaceSnapshot(websites: websites.map(\.snapshot),
                           widgets: widgets.map(\.snapshot),
-                          apps: apps.map { AppSnapshot(id: $0.id, bundleID: $0.bundleID, name: $0.appName,
-                                                       x: $0.center.x, y: $0.center.y,
-                                                       w: $0.size.width, h: $0.size.height) },
-                          background: backgroundStyle.rawValue)
+                          background: backgroundStyle.rawValue,
+                          glow: backgroundGlow, dim: backgroundDim)
     }
 
     private func restore() {
         guard let saved = WorkspaceStore.load() else { return }
         backgroundStyle = WorkspaceBackgroundStyle(rawValue: saved.background) ?? .midnight
+        backgroundGlow = saved.glow ?? 0.9
+        backgroundDim = saved.dim ?? 0.80
         websites = saved.websites.map { item in
             WebsiteSurface(address: item.address, title: item.title,
                            center: CGPoint(x: item.x, y: item.y), id: item.id,
@@ -341,15 +319,8 @@ private final class OverlayModel: ObservableObject {
             return NativeWidgetSurface(kind: kind, center: CGPoint(x: item.x, y: item.y), id: item.id,
                                        size: CGSize(width: item.w, height: item.h), note: item.note)
         }
-        apps = (saved.apps ?? []).map { item in
-            let surface = AppMirrorSurface(bundleID: item.bundleID, appName: item.name,
-                                           center: CGPoint(x: item.x, y: item.y), id: item.id,
-                                           size: CGSize(width: item.w, height: item.h))
-            return surface
-        }
-        for surface in apps { surface.start() }
-        if !websites.isEmpty || !widgets.isEmpty || !apps.isEmpty { hasPlacedInitialSite = true }
-        debugLog("restored \(websites.count) sites, \(widgets.count) widgets, \(apps.count) apps")
+        if !websites.isEmpty || !widgets.isEmpty { hasPlacedInitialSite = true }
+        debugLog("restored \(websites.count) sites, \(widgets.count) widgets")
     }
 
     private func startAutosave() {
@@ -392,9 +363,7 @@ private final class OverlayModel: ObservableObject {
 
     func openSurfaceMenu(at point: CGPoint) {
         debugLog("openSurfaceMenu at \(point) site=\(website(at: point) != nil) widget=\(widget(at: point) != nil)")
-        if let app = app(at: point) {
-            surfaceMenu = SurfaceMenuTarget(site: nil, widget: nil, app: app, point: point)
-        } else if let site = website(at: point) {
+        if let site = website(at: point) {
             surfaceMenu = SurfaceMenuTarget(site: site, widget: nil, point: point)
         } else if let widget = widget(at: point) {
             surfaceMenu = SurfaceMenuTarget(site: nil, widget: widget, point: point)
@@ -475,31 +444,6 @@ private final class OverlayModel: ObservableObject {
     func addWidget(_ kind: NativeWidgetKind, center: CGPoint) {
         let widget = NativeWidgetSurface(kind: kind, center: center)
         withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) { widgets.append(widget) }
-    }
-
-    func addApp(_ bundleID: String, name: String, in size: CGSize, rect: CGRect? = nil) {
-        if apps.contains(where: { $0.bundleID == bundleID }) {
-            if let existing = apps.first(where: { $0.bundleID == bundleID }) { focusedID = existing.id }
-            return
-        }
-        let surfaceSize = rect.map { CGSize(width: max(420, $0.width), height: max(300, $0.height)) }
-            ?? CGSize(width: min(720, size.width * 0.5), height: min(520, size.height * 0.56))
-        let center = rect.map { CGPoint(x: $0.midX, y: $0.midY) } ?? emptyCenter(for: surfaceSize, in: size)
-        let surface = AppMirrorSurface(bundleID: bundleID, appName: name, center: center, size: surfaceSize)
-        withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) { apps.append(surface) }
-        surface.start()
-    }
-
-    func removeApp(_ surface: AppMirrorSurface) {
-        surface.stop()
-        withAnimation(.easeInOut(duration: 0.22)) { apps.removeAll { $0.id == surface.id } }
-    }
-
-    func app(at point: CGPoint) -> AppMirrorSurface? {
-        apps.last { surface in
-            CGRect(x: surface.center.x - surface.size.width / 2, y: surface.center.y - surface.size.height / 2,
-                   width: surface.size.width, height: surface.size.height).contains(point)
-        }
     }
 
     func removeWidget(_ widget: NativeWidgetSurface) {
@@ -589,11 +533,65 @@ private enum WidgetPickerCategory: String, CaseIterable, Identifiable {
 }
 
 private enum LayoutStyle { case grid, cascade }
-private enum WorkspacePanel { case arrange, background, settings }
-private enum WorkspaceBackgroundStyle: String, CaseIterable {
-    case midnight, charcoal, plum
-    var title: String { switch self { case .midnight: "Midnight"; case .charcoal: "Charcoal"; case .plum: "Plum" } }
-    var tint: Color { switch self { case .midnight: Color.indigo.opacity(0.17); case .charcoal: Color.gray.opacity(0.16); case .plum: Color.purple.opacity(0.2) } }
+private enum WorkspacePanel { case background, settings }
+private enum WorkspaceBackgroundStyle: String, CaseIterable, Identifiable {
+    case midnight, charcoal, plum, ocean, forest, ember, rose, daylight, aurora, graphite
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .midnight: "Midnight"
+        case .charcoal: "Charcoal"
+        case .graphite: "Graphite"
+        case .plum: "Plum"
+        case .ocean: "Ocean"
+        case .forest: "Forest"
+        case .ember: "Ember"
+        case .rose: "Rose"
+        case .daylight: "Daylight"
+        case .aurora: "Aurora"
+        }
+    }
+
+    /// Colour used for the centre bloom of the workspace.
+    var tint: Color {
+        switch self {
+        case .midnight: Color(red: 0.35, green: 0.36, blue: 0.95).opacity(0.14)
+        case .charcoal: Color(white: 0.55).opacity(0.10)
+        case .graphite: Color(red: 0.42, green: 0.46, blue: 0.52).opacity(0.11)
+        case .plum: Color(red: 0.65, green: 0.30, blue: 0.85).opacity(0.15)
+        case .ocean: Color(red: 0.20, green: 0.62, blue: 0.92).opacity(0.15)
+        case .forest: Color(red: 0.24, green: 0.76, blue: 0.52).opacity(0.14)
+        case .ember: Color(red: 0.96, green: 0.45, blue: 0.18).opacity(0.15)
+        case .rose: Color(red: 0.96, green: 0.35, blue: 0.55).opacity(0.15)
+        case .daylight: Color(red: 0.92, green: 0.88, blue: 0.78).opacity(0.12)
+        case .aurora: Color(red: 0.30, green: 0.85, blue: 0.80).opacity(0.15)
+        }
+    }
+
+    /// Second bloom, offset to the lower right, for a richer backdrop.
+    var secondary: Color {
+        switch self {
+        case .midnight: Color(red: 0.20, green: 0.60, blue: 0.95).opacity(0.10)
+        case .charcoal: Color(red: 0.45, green: 0.30, blue: 0.55).opacity(0.07)
+        case .graphite: Color(red: 0.30, green: 0.55, blue: 0.60).opacity(0.08)
+        case .plum: Color(red: 0.95, green: 0.35, blue: 0.65).opacity(0.10)
+        case .ocean: Color(red: 0.15, green: 0.90, blue: 0.85).opacity(0.09)
+        case .forest: Color(red: 0.85, green: 0.90, blue: 0.35).opacity(0.07)
+        case .ember: Color(red: 0.85, green: 0.20, blue: 0.35).opacity(0.10)
+        case .rose: Color(red: 0.99, green: 0.70, blue: 0.30).opacity(0.10)
+        case .daylight: Color(red: 0.70, green: 0.85, blue: 1.00).opacity(0.11)
+        case .aurora: Color(red: 0.40, green: 0.55, blue: 0.98).opacity(0.11)
+        }
+    }
+
+    /// Backing dimmer behind the blooms.
+    var base: Color {
+        switch self {
+        case .daylight: Color(white: 0.10)
+        default: Color.black
+        }
+    }
 }
 
 private struct SelectableApp: Identifiable {
@@ -678,13 +676,6 @@ private struct WebsiteSnapshot: Codable {
     var scrollY: Double
 }
 
-private struct AppSnapshot: Codable {
-    var id: UUID
-    var bundleID: String
-    var name: String
-    var x: Double, y: Double, w: Double, h: Double
-}
-
 private struct WidgetSnapshot: Codable {
     var id: UUID
     var kind: String
@@ -696,8 +687,9 @@ private struct WorkspaceSnapshot: Codable {
     var version = 1
     var websites: [WebsiteSnapshot] = []
     var widgets: [WidgetSnapshot] = []
-    var apps: [AppSnapshot]? = []
     var background: String = WorkspaceBackgroundStyle.midnight.rawValue
+    var glow: Double? = 0.9
+    var dim: Double? = 0.80
 }
 
 private enum WorkspaceStore {
@@ -747,14 +739,58 @@ private enum PageScripts {
 
     static let darkMode = """
     (function(){
-      var style = document.getElementById('__see_dark');
-      if (!style) {
-        style = document.createElement('style');
-        style.id = '__see_dark';
-        (document.head || document.documentElement).appendChild(style);
+      function ensureStyle(){
+        var style = document.getElementById('__see_dark');
+        if (!style) {
+          style = document.createElement('style');
+          style.id = '__see_dark';
+          (document.head || document.documentElement).appendChild(style);
+        }
+        return style;
       }
-      style.textContent = ':root{color-scheme:dark !important}html{background:#0b0b0d}body{background:transparent}'
-        + '@media (prefers-color-scheme: light){html,body{background:#0b0b0d !important;color:#eee}}';
+      function luminance(color){
+        var m = (color || '').match(/[0-9.]+/g);
+        if (!m || m.length < 3) { return null; }
+        // Fully transparent tells us nothing about the painted colour.
+        if (m.length > 3 && parseFloat(m[3]) === 0) { return null; }
+        return 0.299 * parseFloat(m[0]) + 0.587 * parseFloat(m[1]) + 0.114 * parseFloat(m[2]);
+      }
+      function apply(){
+        var root = document.documentElement;
+        if (!root) { return; }
+        root.style.setProperty('color-scheme', 'dark', 'important');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        if (!meta && document.head) {
+          meta = document.createElement('meta');
+          meta.setAttribute('name', 'color-scheme');
+          meta.setAttribute('content', 'dark');
+          document.head.appendChild(meta);
+        } else if (meta) {
+          meta.setAttribute('content', 'dark');
+        }
+        var style = ensureStyle();
+        var bodyLum = luminance(getComputedStyle(document.body || root).backgroundColor);
+        var rootLum = luminance(getComputedStyle(root).backgroundColor);
+        var bgLum = bodyLum === null ? rootLum : (rootLum === null ? bodyLum : Math.max(bodyLum, rootLum));
+        if (bgLum === null) { bgLum = 255; }   // both transparent: assume a light page
+        // The page ignored prefers-color-scheme and still paints a light
+        // background: invert it and let See's own dark chrome take over.
+        var needsInvert = bgLum !== null && bgLum > 140;
+        // WebKit ignores a filter on the root element, so invert the body.
+        style.textContent = needsInvert
+          ? 'html{background:#0b0b0d !important}'
+            + 'body{filter:invert(1) hue-rotate(180deg) !important;background:#f2f2f4 !important}'
+            + 'img,video,picture,canvas,svg image,[style*="background-image"]{filter:invert(1) hue-rotate(180deg) !important}'
+          : '';
+      }
+      function dbg(msg){ try { window.webkit.messageHandlers.seeDebugLog.postMessage(msg); } catch (err) {} }
+      function run(){
+        try { apply(); } catch (err) { dbg('dark error ' + err); }
+      }
+      run();
+      setTimeout(run, 350);
+      setTimeout(run, 1200);
+      setTimeout(run, 2600);
     })();
     """
 
@@ -776,7 +812,11 @@ private enum PageScripts {
           ensure();
           if (!window.__seeHideObserver) {
             window.__seeHideObserver = new MutationObserver(function(){ ensure(); });
-            window.__seeHideObserver.observe(document.documentElement, { childList: true, subtree: true });
+            window.__seeHideObserver.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
+          }
+          if (!window.__seeHideRaf) {
+            var ticks = 0;
+            window.__seeHideRaf = setInterval(function(){ ensure(); if (++ticks > 40) { clearInterval(window.__seeHideRaf); } }, 50);
           }
         })();
         """
@@ -844,13 +884,38 @@ private enum PageScripts {
         return node;
       }
 
+      function uniqueSelector(sel){
+        try { return document.querySelectorAll(sel).length === 1; } catch (err) { return false; }
+      }
+      function classesOf(el){
+        var raw = (typeof el.className === 'string') ? el.className : '';
+        return raw.trim().split(/\\s+/).filter(function(c){
+          return c && c.length < 40 && !/^[0-9]/.test(c) && !/^(ng|css|jsx|sc)-/.test(c);
+        }).slice(0, 2);
+      }
       function pathFor(el){
         if (!el || el.nodeType !== 1) { return null; }
-        if (el.id) { return '#' + CSS.escape(el.id); }
+        if (el.id) {
+          var byId = '#' + CSS.escape(el.id);
+          if (uniqueSelector(byId)) { return byId; }
+        }
+        var cls = classesOf(el);
+        if (cls.length) {
+          var byClass = el.tagName.toLowerCase() + cls.map(function(c){ return '.' + CSS.escape(c); }).join('');
+          if (uniqueSelector(byClass)) { return byClass; }
+        }
         var parts = [], node = el, depth = 0;
-        while (node && node.nodeType === 1 && depth < 5 && node !== document.body) {
-          var part = node.tagName.toLowerCase();
+        while (node && node.nodeType === 1 && depth < 8 && node !== document.documentElement) {
           var parent = node.parentElement;
+          if (node.id) {
+            parts.unshift('#' + CSS.escape(node.id));
+            var withId = parts.join(' > ');
+            if (uniqueSelector(withId)) { return withId; }
+            node = parent; depth++; continue;
+          }
+          var part = node.tagName.toLowerCase();
+          var own = classesOf(node)[0];
+          if (own) { part += '.' + CSS.escape(own); }
           if (parent) {
             var index = 1, sibling = node;
             while ((sibling = sibling.previousElementSibling)) {
@@ -859,10 +924,33 @@ private enum PageScripts {
             part += ':nth-of-type(' + index + ')';
           }
           parts.unshift(part);
-          if (node.id) { parts[0] = '#' + CSS.escape(node.id); break; }
+          var candidate = parts.join(' > ');
+          if (uniqueSelector(candidate)) { return candidate; }
           node = parent; depth++;
         }
         return parts.join(' > ');
+      }
+      // An icon or label usually sits inside the thing the user means to zap.
+      function actionable(el){
+        var node = el, up = 0;
+        while (node && node !== document.body && node !== document.documentElement && up < 8) {
+          var tag = node.tagName.toLowerCase();
+          if (tag === 'button' || tag === 'a' || tag === 'input' || tag === 'textarea' || tag === 'select') { return node; }
+          if (node.getAttribute) {
+            var role = node.getAttribute('role');
+            if (role === 'button' || role === 'link' || role === 'menuitem' || role === 'tab') { return node; }
+          }
+          if (tag === 'svg' || tag === 'path' || tag === 'use' || tag === 'g') { node = node.parentElement; up++; continue; }
+          if (tag === 'span' || tag === 'i' || tag === 'b' || tag === 'em') {
+            var parent = node.parentElement;
+            if (parent) {
+              var pt = parent.tagName.toLowerCase();
+              if (pt === 'button' || pt === 'a' || parent.getAttribute && parent.getAttribute('role') === 'button') { node = parent; continue; }
+            }
+          }
+          break;
+        }
+        return node || el;
       }
       var lastDebug = 0;
       function dbg(text){
@@ -882,7 +970,7 @@ private enum PageScripts {
         if (!el || el === document.body || el === document.documentElement) { clear(); return; }
         el = deepest(el, e.clientX, e.clientY);
         if (el === document.body || el === document.documentElement) { clear(); return; }
-        dbg('paint ' + el.tagName + '.' + (el.className || '') + ' #' + (el.id || ''));
+        el = actionable(el);
         paint(el);
       };
       window.__seePickerClick = function(e){
@@ -890,6 +978,7 @@ private enum PageScripts {
         var el = document.elementFromPoint(e.clientX, e.clientY) || e.target;
         if (el === box || el === label) { el = target; }
         el = deepest(el, e.clientX, e.clientY);
+        el = actionable(el);
         var selector = pathFor(el);
         clear();
         if (selector) {
@@ -904,6 +993,7 @@ private enum PageScripts {
         if (!el || el === box || el === label || el === document.body || el === document.documentElement) { clear(); return; }
         el = deepest(el, x, y);
         if (el === document.body || el === document.documentElement) { clear(); return; }
+        el = actionable(el);
         if (el !== target) { paint(el); }
       };
       window.__seePickerScroll = function(){ if (target) { paint(target); } };
@@ -971,312 +1061,6 @@ private final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
     }
 }
 
-
-// MARK: - App mirrors
-// A real app lives inside the workspace: its window content is streamed with
-// ScreenCaptureKit and mouse input is forwarded back to the owning process, so
-// the app is usable without ever leaving the peek.
-
-@MainActor
-private final class AppMirrorSurface: ObservableObject, Identifiable {
-    let id: UUID
-    let bundleID: String
-    let appName: String
-    @Published var center: CGPoint
-    @Published var size: CGSize
-    @Published var status: MirrorStatus = .starting
-    @Published var isDragging = false
-    @Published var windowFrame: CGRect = .zero      // screen points, top-left origin
-    @Published var pid: pid_t = 0
-    var icon: NSImage?
-
-    let controller = AppMirrorController()
-
-    init(bundleID: String, appName: String, center: CGPoint, id: UUID = UUID(), size: CGSize? = nil) {
-        self.id = id
-        self.bundleID = bundleID
-        self.appName = appName
-        self.center = center
-        self.size = size ?? CGSize(width: 620, height: 420)
-        icon = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
-            .map { NSWorkspace.shared.icon(forFile: $0.path) }
-        controller.surface = self
-    }
-
-    func start() {
-        status = .starting
-        Task { await controller.start(bundleID: bundleID, size: size) }
-    }
-
-    func stop() { controller.stop() }
-
-    func updateWindowFrame() {
-        guard let info = AppWindows.window(for: pid) else { return }
-        windowFrame = info
-    }
-
-    func forward(_ event: NSEvent) {}
-}
-
-private enum MirrorStatus: Equatable {
-    case starting
-    case live
-    case needsPermission
-    case failed(String)
-
-    var title: String {
-        switch self {
-        case .starting: "Connecting…"
-        case .live: "Live"
-        case .needsPermission: "Screen Recording needed"
-        case .failed(let message): message
-        }
-    }
-}
-
-private enum AppWindows {
-    /// The on-screen content window of a process, in screen points.
-    static func window(for pid: pid_t) -> CGRect? {
-        guard pid > 0 else { return nil }
-        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-        guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else { return nil }
-        var best: (CGRect, Int)?
-        for item in list {
-            guard let owner = item[kCGWindowOwnerPID as String] as? pid_t, owner == pid,
-                  let layer = item[kCGWindowLayer as String] as? Int, layer == 0,
-                  let boundsDict = item[kCGWindowBounds as String] as? [String: Any],
-                  let rect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else { continue }
-            if rect.width < 120 || rect.height < 80 { continue }
-            if let current = best {
-                if rect.width * rect.height > current.0.width * current.0.height { best = (rect, layer) }
-            } else {
-                best = (rect, layer)
-            }
-        }
-        return best?.0
-    }
-}
-
-private final class AppMirrorContentView: NSView {
-    let imageLayer = CALayer()
-    var onInput: ((NSEvent, CGPoint) -> Void)?
-    var onDoubleClick: (() -> Void)?
-
-    override var isFlipped: Bool { true }
-
-    init() {
-        super.init(frame: .zero)
-        wantsLayer = true
-        layer?.masksToBounds = true
-        imageLayer.contentsGravity = .resizeAspect
-        imageLayer.backgroundColor = NSColor.black.cgColor
-        layer?.addSublayer(imageLayer)
-    }
-    required init?(coder: NSCoder) { fatalError() }
-
-    override func layout() {
-        super.layout()
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        imageLayer.frame = bounds
-        CATransaction.commit()
-    }
-
-    func display(_ image: CGImage) {
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        imageLayer.contents = image
-        CATransaction.commit()
-    }
-
-    private func localPoint(_ event: NSEvent) -> CGPoint {
-        let p = convert(event.locationInWindow, from: nil)
-        return CGPoint(x: p.x / max(1, bounds.width), y: p.y / max(1, bounds.height))
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        if event.clickCount == 2 { onDoubleClick?(); return }
-        onInput?(event, localPoint(event))
-    }
-    override func rightMouseDown(with event: NSEvent) { onInput?(event, localPoint(event)) }
-    override func otherMouseDown(with event: NSEvent) { onInput?(event, localPoint(event)) }
-    override func scrollWheel(with event: NSEvent) { onInput?(event, localPoint(event)) }
-    override func mouseDragged(with event: NSEvent) { onInput?(event, localPoint(event)) }
-    override func mouseUp(with event: NSEvent) { onInput?(event, localPoint(event)) }
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-}
-
-private struct AppMirrorContentViewRepresentable: NSViewRepresentable {
-    let surface: AppMirrorSurface
-
-    func makeNSView(context: Context) -> AppMirrorContentView {
-        let view = AppMirrorContentView()
-        surface.controller.view = view
-        view.onInput = { event, point in surface.controller.forward(event, in: view, at: point) }
-        view.onDoubleClick = { surface.controller.focusApp() }
-        return view
-    }
-
-    func updateNSView(_ view: AppMirrorContentView, context: Context) {
-        surface.controller.view = view
-    }
-}
-
-@MainActor
-private final class AppMirrorController: NSObject, @preconcurrency SCStreamOutput, @preconcurrency SCStreamDelegate {
-    weak var surface: AppMirrorSurface?
-    weak var view: AppMirrorContentView?
-
-    private var stream: SCStream?
-    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
-    private var lastFrameTime: CFAbsoluteTime = 0
-
-    func start(bundleID: String, size: CGSize) async {
-        stop()
-        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
-            surface?.status = .failed("App not found")
-            return
-        }
-        let config = NSWorkspace.OpenConfiguration()
-        config.activates = false
-        let running = NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == bundleID }
-        let launched = try? await NSWorkspace.shared.openApplication(at: url, configuration: config)
-        let app = running ?? launched
-
-        guard let app else {
-            surface?.status = .failed("Could not launch app")
-            return
-        }
-        surface?.pid = app.processIdentifier
-        app.unhide()   // its window must exist on screen; See keeps the focus
-        // Give the app a moment to put a window on screen.
-        var frame: CGRect?
-        for _ in 0..<25 {
-            try? await Task.sleep(nanoseconds: 200_000_000)
-            frame = AppWindows.window(for: app.processIdentifier)
-            if frame != nil { break }
-        }
-        guard let frame else {
-            surface?.status = .failed("No window to mirror")
-            return
-        }
-        surface?.windowFrame = frame
-
-        if !CGPreflightScreenCaptureAccess() {
-            CGRequestScreenCaptureAccess()
-            surface?.status = .needsPermission
-            return
-        }
-
-        do {
-            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-            guard let window = content.windows
-                .filter({ $0.owningApplication?.bundleIdentifier == bundleID && $0.windowLayer == 0 })
-                .max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
-            else {
-                surface?.status = .failed("No window to mirror")
-                return
-            }
-            surface?.windowFrame = window.frame
-            let filter = SCContentFilter(desktopIndependentWindow: window)
-            let config = SCStreamConfiguration()
-            let scale = NSScreen.main?.backingScaleFactor ?? 2
-            config.width = Int(max(320, window.frame.width * scale))
-            config.height = Int(max(240, window.frame.height * scale))
-            config.minimumFrameInterval = CMTime(value: 1, timescale: 30)
-            config.queueDepth = 3
-            config.showsCursor = false
-            config.pixelFormat = kCVPixelFormatType_32BGRA
-
-            let stream = SCStream(filter: filter, configuration: config, delegate: self)
-            try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: .main)
-            try await stream.startCapture()
-            self.stream = stream
-            surface?.status = .live
-            debugLog("mirror live \(bundleID) \(window.frame)")
-        } catch {
-            debugLog("mirror failed \(error)")
-            surface?.status = .failed("Mirror unavailable")
-        }
-    }
-
-    func stop() {
-        let stream = self.stream
-        self.stream = nil
-        Task { try? await stream?.stopCapture() }
-    }
-
-    func focusApp() {
-        guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == surface?.bundleID }) else { return }
-        app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-    }
-
-    nonisolated func stream(_ stream: SCStream, didStopWithError error: Error) {
-        debugLog("mirror stopped \(error)")
-    }
-
-    private nonisolated static let frameContext = CIContext(options: [.useSoftwareRenderer: false])
-
-    nonisolated func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen, sampleBuffer.isValid else { return }
-        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
-              let statusRaw = attachments.first?[.status] as? Int,
-              let status = SCFrameStatus(rawValue: statusRaw), status == .complete else { return }
-        guard let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        let image = CIImage(cvPixelBuffer: buffer)
-        guard let cgImage = Self.frameContext.createCGImage(image, from: image.extent) else { return }
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            let now = CFAbsoluteTimeGetCurrent()
-            if now - self.lastFrameTime < 1.0 / 24.0 { return }
-            self.lastFrameTime = now
-            self.view?.display(cgImage)
-        }
-    }
-
-    /// Re-target a mouse event onto the mirrored window and deliver it to the app.
-    func forward(_ event: NSEvent, in view: AppMirrorContentView, at fraction: CGPoint) {
-        guard let surface, surface.pid > 0 else { return }
-        if surface.windowFrame == .zero { surface.updateWindowFrame() }
-        let frame = surface.windowFrame
-        guard frame.width > 1 else { return }
-        // Letterboxed content: map through the aspect-fit rect.
-        let videoAspect = frame.width / frame.height
-        let bounds = view.bounds
-        let fitWidth = min(bounds.width, bounds.height * videoAspect)
-        let fitHeight = fitWidth / videoAspect
-        let insetX = (bounds.width - fitWidth) / 2
-        let insetY = (bounds.height - fitHeight) / 2
-        let point = CGPoint(x: fraction.x * bounds.width - insetX, y: fraction.y * bounds.height - insetY)
-        guard point.x >= -1, point.y >= -1, point.x <= fitWidth + 1, point.y <= fitHeight + 1 else { return }
-        let screenPoint = CGPoint(x: frame.minX + point.x / fitWidth * frame.width,
-                                  y: frame.minY + point.y / fitHeight * frame.height)
-
-        let type: CGEventType
-        switch event.type {
-        case .leftMouseDown: type = .leftMouseDown
-        case .leftMouseUp: type = .leftMouseUp
-        case .leftMouseDragged: type = .leftMouseDragged
-        case .rightMouseDown: type = .rightMouseDown
-        case .rightMouseUp: type = .rightMouseUp
-        case .otherMouseDown: type = .otherMouseDown
-        case .otherMouseUp: type = .otherMouseUp
-        case .scrollWheel: type = .scrollWheel
-        default: return
-        }
-
-        if type == .scrollWheel {
-            let dy = Int32(event.scrollingDeltaY * (event.hasPreciseScrollingDeltas ? 1 : 6))
-            guard let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: dy, wheel2: 0, wheel3: 0) else { return }
-            cg.location = screenPoint
-            cg.postToPid(surface.pid)
-            return
-        }
-        let button: CGMouseButton = (type == .rightMouseDown || type == .rightMouseUp) ? .right
-            : ((type == .otherMouseDown || type == .otherMouseUp) ? .center : .left)
-        guard let cg = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: screenPoint, mouseButton: button) else { return }
-        cg.setIntegerValueField(.mouseEventClickState, value: Int64(event.clickCount))
-        cg.postToPid(surface.pid)
-    }
-}
 
 // MARK: - Surface models
 
@@ -1379,6 +1163,11 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     /// Push the current configuration into the live web view.
     func applyTuning(reload: Bool) {
         guard let webView else { return }
+        if config.darkMode {
+            webView.evaluateJavaScript(PageScripts.darkMode, completionHandler: nil)
+        } else {
+            webView.evaluateJavaScript("(function(){var s=document.getElementById('__see_dark');if(s){s.textContent=\"\";}document.documentElement.style.removeProperty('color-scheme');})();", completionHandler: nil)
+        }
         webView.customUserAgent = config.userAgent.string
         webView.appearance = config.darkMode ? NSAppearance(named: .darkAqua) : nil
         installUserScripts(in: webView)
@@ -1393,10 +1182,16 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         let controller = webView.configuration.userContentController
         controller.removeAllUserScripts()
         if !config.hiddenSelectors.isEmpty {
+            // Document start: the elements are hidden before the first paint, so a
+            // zapped item never flashes when the peek opens.
+            controller.addUserScript(WKUserScript(source: PageScripts.hideCSS(config.hiddenSelectors),
+                                                  injectionTime: .atDocumentStart, forMainFrameOnly: false))
             controller.addUserScript(WKUserScript(source: PageScripts.hideCSS(config.hiddenSelectors),
                                                   injectionTime: .atDocumentEnd, forMainFrameOnly: false))
         }
         if config.darkMode {
+            controller.addUserScript(WKUserScript(source: PageScripts.darkMode,
+                                                  injectionTime: .atDocumentStart, forMainFrameOnly: false))
             controller.addUserScript(WKUserScript(source: PageScripts.darkMode,
                                                   injectionTime: .atDocumentEnd, forMainFrameOnly: false))
         }
@@ -1409,8 +1204,12 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     }
 
     func applyHiddenSelectors() {
-        guard let webView, !config.hiddenSelectors.isEmpty else { return }
+        guard let webView else { return }
+        // An empty list clears the stylesheet, which is how an "unzap" becomes
+        // visible immediately instead of after a reload.
         webView.evaluateJavaScript(PageScripts.hideCSS(config.hiddenSelectors), completionHandler: nil)
+        installUserScripts(in: webView)
+        refreshChromeSnapshot()
     }
 
     func setPicking(_ picking: Bool) {
@@ -1459,6 +1258,7 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         guard chromeSnapshot != nil || webView?.isHidden == true else { return }
         chromeSnapshot = nil
         webView?.isHidden = false
+        guard !isPickingElements else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { [weak self] in
             self?.enterChromeMode()
         }
@@ -1614,6 +1414,7 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate {
         let local = convert(event.locationInWindow, from: nil)
         if bounds.contains(local) { return }
         onHoverChange?(false)
+        NSCursor.arrow.set()
         debugLog("site hover exit")
         if handles.isNearControl { handles.isNearControl = false; handles.needsDisplay = true }
         if handles.isNearClose { handles.isNearClose = false; handles.needsDisplay = true }
@@ -1626,7 +1427,12 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate {
     }
 
     override func mouseMoved(with event: NSEvent) {
-        updateProximity(at: convert(event.locationInWindow, from: nil))
+        let local = convert(event.locationInWindow, from: nil)
+        updateProximity(at: local)
+        if closeRect.contains(local) { NSCursor.pointingHand.set() }
+        else if moveRect.contains(local) { NSCursor.openHand.set() }
+        else if resizeRect.contains(local) { seeResizeCursor().set() }
+        else { NSCursor.arrow.set() }
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -1711,7 +1517,32 @@ private final class WebsiteHandleView: NSView {
     }
 }
 
+
+/// A real resize cursor where the OS has one; a two-way arrow otherwise.
+func seeResizeCursor() -> NSCursor {
+    if #available(macOS 15.0, *) {
+        return NSCursor.frameResize(position: .bottomRight, directions: .all)
+    }
+    return NSCursor.resizeLeftRight
+}
+
 private enum SurfaceHandleKind: Equatable { case move, resize }
+
+private enum SurfaceCursorZone: Equatable { case close, move, resize }
+
+@MainActor
+private final class CursorZoneState { static var zone: SurfaceCursorZone? }
+
+/// Handle hit zones in screen coordinates, matching the surface's control layout.
+private func surfaceCursorZone(_ p: CGPoint, _ rect: CGRect, close: Bool) -> SurfaceCursorZone? {
+    let resize = CGRect(x: rect.maxX - 58, y: rect.maxY - 58, width: 58, height: 58)
+    let move = CGRect(x: rect.midX - 90, y: rect.maxY - 72, width: 180, height: 72)
+    let closeRect = CGRect(x: rect.maxX - 58, y: rect.minY, width: 58, height: 58)
+    if close && closeRect.contains(p) { return .close }
+    if resize.contains(p) { return .resize }
+    if move.contains(p) { return .move }
+    return nil
+}
 
 private struct RoundedResizeCorner: Shape {
     func path(in rect: CGRect) -> Path {
@@ -1768,195 +1599,6 @@ private struct PlacedWidgetView: View {
 }
 
 
-// MARK: - App mirror card
-
-@MainActor
-private struct PlacedAppView: View {
-    @ObservedObject var surface: AppMirrorSurface
-    let onClose: () -> Void
-
-    var body: some View {
-        AppMirrorCard(surface: surface, onClose: onClose)
-            .position(x: surface.center.x, y: surface.center.y)
-    }
-}
-
-@MainActor
-private struct AppMirrorCard: View {
-    @ObservedObject var surface: AppMirrorSurface
-    let onClose: () -> Void
-    @StateObject private var hover = HoverState()
-
-    var body: some View {
-        ZStack(alignment: .top) {
-            AppMirrorContentViewRepresentable(surface: surface)
-                .frame(width: surface.size.width, height: surface.size.height)
-                .background(Color.black.opacity(0.55))
-
-            if surface.status != .live {
-                statusOverlay
-                    .frame(width: surface.size.width, height: surface.size.height)
-            }
-
-            // Drag strip / title
-            HStack(spacing: 9) {
-                if let icon = surface.icon {
-                    Image(nsImage: icon).resizable().frame(width: 16, height: 16)
-                }
-                Text(surface.appName)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.86))
-                Spacer(minLength: 0)
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .bold)).foregroundStyle(.white.opacity(0.9))
-                        .frame(width: 20, height: 20).background(.white.opacity(0.14), in: Circle())
-                }
-                .buttonStyle(.plain)
-                .opacity(hover.showClose ? 1 : 0)
-                .animation(.easeInOut(duration: 0.16), value: hover.showClose)
-            }
-            .padding(.horizontal, 10)
-            .frame(width: surface.size.width, height: 34)
-            .background(
-                LinearGradient(colors: [.black.opacity(0.62), .black.opacity(0.0)],
-                               startPoint: .top, endPoint: .bottom)
-            )
-            .overlay(alignment: .bottom) {
-                Capsule().fill(.white.opacity(hover.nearMove ? 0.7 : 0))
-                    .frame(width: 46, height: 4).padding(.bottom, 2)
-                    .allowsHitTesting(false)
-            }
-
-            AppCardDragHandler(surface: surface,
-                               onHoverChange: { hover.setHovering($0) },
-                               onMoveActive: { hover.nearMove = $0 },
-                               onResizeActive: { _ in })
-        }
-        .frame(width: surface.size.width, height: surface.size.height)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(.white.opacity(hover.showClose ? 0.24 : 0.12), lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(surface.isDragging ? 0.3 : 0.42),
-                radius: surface.isDragging ? 18 : 32, y: surface.isDragging ? 8 : 16)
-        .transaction { tx in if surface.isDragging { tx.animation = nil } }
-    }
-
-    @ViewBuilder private var statusOverlay: some View {
-        VStack(spacing: 10) {
-            if let icon = surface.icon {
-                Image(nsImage: icon).resizable().frame(width: 44, height: 44).opacity(0.9)
-            }
-            Text(surface.status.title)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.white.opacity(0.7))
-                .multilineTextAlignment(.center)
-            if surface.status == .needsPermission {
-                Button("Open System Settings") {
-                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
-        }
-        .padding(18)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.black.opacity(0.75))
-    }
-}
-
-private struct AppCardDragHandler: NSViewRepresentable {
-    @ObservedObject var surface: AppMirrorSurface
-    let onHoverChange: (Bool) -> Void
-    let onMoveActive: (Bool) -> Void
-    let onResizeActive: (Bool) -> Void
-
-    func makeNSView(context: Context) -> AppCardDragView {
-        let v = AppCardDragView()
-        v.surface = surface
-        v.onHoverChange = onHoverChange
-        v.onMoveActive = onMoveActive
-        v.onResizeActive = onResizeActive
-        return v
-    }
-
-    func updateNSView(_ v: AppCardDragView, context: Context) {
-        v.surface = surface
-        v.onHoverChange = onHoverChange
-        v.onMoveActive = onMoveActive
-        v.onResizeActive = onResizeActive
-    }
-}
-
-@MainActor
-private final class AppCardDragView: NSView {
-    var surface: AppMirrorSurface?
-    var onHoverChange: ((Bool) -> Void)?
-    var onMoveActive: ((Bool) -> Void)?
-    var onResizeActive: ((Bool) -> Void)?
-
-    private var dragging = false
-    private var resizing = false
-    private var dragOffset = CGPoint.zero
-    private var resizeStart = CGSize.zero
-    private var startMouse = CGPoint.zero
-
-    override var isFlipped: Bool { true }
-    init() { super.init(frame: .zero) }
-    required init?(coder: NSCoder) { fatalError() }
-
-    override func mouseEntered(with event: NSEvent) {
-        onHoverChange?(true); onMoveActive?(true)
-    }
-    override func mouseExited(with event: NSEvent) {
-        let local = convert(event.locationInWindow, from: nil)
-        guard !bounds.contains(local) else { return }
-        onHoverChange?(false); onMoveActive?(false)
-    }
-
-    private var moveRect: CGRect { CGRect(x: 0, y: 0, width: bounds.width, height: 46) }
-    private var resizeRect: CGRect { CGRect(x: bounds.width - 34, y: bounds.height - 34, width: 34, height: 34) }
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        let local = convert(point, from: superview)
-        if moveRect.contains(local) || resizeRect.contains(local) { return self }
-        return nil
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        guard let surface else { return }
-        let local = convert(event.locationInWindow, from: nil)
-        if resizeRect.contains(local) {
-            resizing = true
-            resizeStart = surface.size
-            startMouse = event.locationInWindow
-        } else if moveRect.contains(local) {
-            dragging = true
-            dragOffset = CGPoint(x: surface.center.x - event.locationInWindow.x,
-                                 y: surface.center.y - event.locationInWindow.y)
-            surface.isDragging = true
-        }
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        guard let surface else { return }
-        let p = event.locationInWindow
-        if resizing {
-            surface.size = CGSize(width: max(320, resizeStart.width + (p.x - startMouse.x)),
-                                  height: max(220, resizeStart.height + (p.y - startMouse.y)))
-        } else if dragging {
-            surface.center = CGPoint(x: p.x + dragOffset.x, y: p.y + dragOffset.y)
-        }
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        dragging = false; resizing = false
-        surface?.isDragging = false
-    }
-}
-
 // MARK: - Root overlay
 
 @MainActor
@@ -1974,29 +1616,23 @@ private struct SeeOverlay: View {
         GeometryReader { geo in
             let size = geo.size
             ZStack {
-                Color.black.opacity(0.70).ignoresSafeArea()
+                model.backgroundStyle.base.opacity(model.backgroundDim).ignoresSafeArea()
                     .opacity(appeared ? 1 : 0)
                     .animation(.easeOut(duration: 0.34), value: appeared)
                 RadialGradient(colors: [model.backgroundStyle.tint, .clear],
-                               center: .center, startRadius: 60, endRadius: size.height * 0.9)
+                               center: UnitPoint(x: 0.5, y: 0.45),
+                               startRadius: 40, endRadius: size.height * 0.95)
                     .ignoresSafeArea()
-                    .scaleEffect(appeared ? 1 : 1.08)
-                    .opacity(appeared ? 1 : 0)
-                    .animation(.easeOut(duration: 0.55), value: appeared)
-
-                // App mirrors
-                ForEach(Array(model.apps.enumerated()), id: \.element.id) { index, surface in
-                    PlacedAppView(surface: surface, onClose: { model.removeApp(surface) })
-                        .scaleEffect(appeared ? 1 : 0.95)
-                        .opacity(appeared ? 1 : 0)
-                        .blur(radius: appeared ? 0 : 10)
-                        .animation(.spring(response: 0.55, dampingFraction: 0.86)
-                            .delay(Double(index) * 0.045), value: appeared)
-                        .zIndex(1 + Double(index))
-                        .transition(.asymmetric(
-                            insertion: .opacity.combined(with: .scale(scale: 0.94)),
-                            removal: .opacity.combined(with: .scale(scale: 0.92))))
-                }
+                    .opacity(model.backgroundGlow)
+                    .scaleEffect(appeared ? 1 : 1.03)
+                    .animation(.easeOut(duration: 0.3), value: appeared)
+                RadialGradient(colors: [model.backgroundStyle.secondary, .clear],
+                               center: UnitPoint(x: 0.78, y: 0.82),
+                               startRadius: 30, endRadius: size.height * 0.75)
+                    .ignoresSafeArea()
+                    .opacity(model.backgroundGlow * 0.9)
+                    .scaleEffect(appeared ? 1 : 1.03)
+                    .animation(.easeOut(duration: 0.3), value: appeared)
 
                 // Website surfaces
                 ForEach(Array(model.websites.enumerated()), id: \.element.id) { index, site in
@@ -2005,17 +1641,14 @@ private struct SeeOverlay: View {
                                       onFocus: { model.focusedID = site.id },
                                       onClose: { model.remove(site) },
                                       onPick: { selector in
+                                          // Stay in picking mode so several elements can be
+                                          // zapped in a row without reopening the panel.
                                           site.addHiddenSelector(selector)
-                                          site.setPicking(false)
-                                          withAnimation(.spring(response: 0.3, dampingFraction: 0.84)) {
-                                              model.configuring = site
-                                          }
                                       })
-                        .scaleEffect(appeared ? 1 : 0.955)
+                        .scaleEffect(appeared ? 1 : 0.97)
                         .opacity(appeared ? 1 : 0)
-                        .blur(radius: appeared ? 0 : 12)
-                        .animation(.spring(response: 0.55, dampingFraction: 0.86)
-                            .delay(Double(index) * 0.045), value: appeared)
+                        .animation(.spring(response: 0.26, dampingFraction: 0.74)
+                            .delay(Double(index) * 0.012), value: appeared)
                         .zIndex(model.focusedID == site.id ? 2 : Double(index))
                         .transition(.asymmetric(
                             insertion: .opacity.combined(with: .scale(scale: 0.94)),
@@ -2025,11 +1658,10 @@ private struct SeeOverlay: View {
                 // Native widget surfaces
                 ForEach(Array(model.widgets.enumerated()), id: \.element.id) { index, widget in
                     PlacedWidgetView(widget: widget, onClose: { model.removeWidget(widget) })
-                        .scaleEffect(appeared ? 1 : 0.94)
+                        .scaleEffect(appeared ? 1 : 0.95)
                         .opacity(appeared ? 1 : 0)
-                        .blur(radius: appeared ? 0 : 12)
-                        .animation(.spring(response: 0.55, dampingFraction: 0.86)
-                            .delay(Double(model.websites.count + index) * 0.045), value: appeared)
+                        .animation(.spring(response: 0.26, dampingFraction: 0.74)
+                            .delay(Double(model.websites.count + index) * 0.012), value: appeared)
                         .zIndex(3 + Double(index))
                         .transition(.asymmetric(
                             insertion: .opacity.combined(with: .scale(scale: 0.94)),
@@ -2045,9 +1677,9 @@ private struct SeeOverlay: View {
                     bottomBar
                 }
                 .padding(.horizontal, 28).padding(.top, 46).padding(.bottom, 24)
-                .offset(y: appeared ? 0 : -16)
+                .offset(y: appeared ? 0 : -10)
                 .opacity(appeared ? 1 : 0)
-                .animation(.spring(response: 0.5, dampingFraction: 0.9).delay(0.06), value: appeared)
+                .animation(.spring(response: 0.24, dampingFraction: 0.7).delay(0.01), value: appeared)
                 .zIndex(60)   // chrome stays usable above live website surfaces
 
                 ChromeOverlay(model: model, onCloseOverlay: onClose)
@@ -2079,14 +1711,21 @@ private struct SeeOverlay: View {
                     contextMenuFrame: { activeMenuFrame(in: size) },
                     onDragCreating: { rect in model.dragCreatingRect = rect },
                     onDragCreated: { rect in
+                        debugLog("drag created \(rect)")
                         model.dragCreatingRect = .null
                         if rect.width > 80 {
-                            model.pendingPickerForRect = rect
-                            model.pickerCategory = .websites
-                            model.pickerSearch = ""
-                            withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
-                                model.showingWidgetPicker = true
+                            // Let this mouse-up finish dispatching first: a picker
+                            // created inside the event would receive the same up and
+                            // immediately close itself through its backdrop tap.
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                                model.pendingPickerForRect = rect
+                                model.pickerCategory = .websites
+                                model.pickerSearch = ""
+                                withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                                    model.showingWidgetPicker = true
+                                }
                             }
+                            debugLog("picker opened from drag")
                         }
                     }
                 )
@@ -2122,9 +1761,11 @@ private struct SeeOverlay: View {
     private func setAppeared(_ value: Bool) { anim.appeared = value }
 
     private func routeHover(_ screenPoint: CGPoint) {
-        guard model.websites.contains(where: { $0.isPickingElements }) else { return }
         let screenHeight = NSScreen.main?.frame.height ?? 0
         let p = CGPoint(x: screenPoint.x, y: screenHeight - screenPoint.y)
+        MenuHover.shared.update(point: p)
+        updateCursor(at: p)
+        guard model.websites.contains(where: { $0.isPickingElements }) else { return }
         for site in model.websites where site.isPickingElements {
             let frame = CGRect(x: site.center.x - site.size.width / 2,
                                y: site.center.y - site.size.height / 2,
@@ -2135,8 +1776,46 @@ private struct SeeOverlay: View {
         }
     }
 
+    // The handles' own tracking areas stay quiet while See's non-activating
+    // panel is not the key window, so drive the cursor from the global pointer.
+    private func updateCursor(at p: CGPoint) {
+        let menuOpen = model.contextMenuPoint != nil || model.surfaceMenu != nil
+            || model.configuring != nil || model.showingWidgetPicker
+        var zone: SurfaceCursorZone?
+        if !menuOpen && model.websites.allSatisfy({ !$0.isPickingElements }) {
+            for site in model.websites {
+                let rect = CGRect(x: site.center.x - site.size.width / 2,
+                                  y: site.center.y - site.size.height / 2,
+                                  width: site.size.width, height: site.size.height)
+                if rect.contains(p) { zone = surfaceCursorZone(p, rect, close: true); break }
+            }
+            if zone == nil {
+                for widget in model.widgets {
+                    let rect = CGRect(x: widget.center.x - widget.size.width / 2,
+                                      y: widget.center.y - widget.size.height / 2,
+                                      width: widget.size.width, height: widget.size.height)
+                    if rect.contains(p) { zone = surfaceCursorZone(p, rect, close: false); break }
+                }
+            }
+        }
+        guard zone != CursorZoneState.zone else { return }
+        CursorZoneState.zone = zone
+        debugLog("cursor zone -> \(String(describing: zone))")
+        switch zone {
+        case .close: NSCursor.pointingHand.set()
+        case .move: NSCursor.openHand.set()
+        case .resize: seeResizeCursor().set()
+        case nil: NSCursor.arrow.set()
+        }
+    }
+
     private func dismissTopmost() {
-        if let site = model.configuring {
+        debugLog("dismissTopmost picker=\(model.showingWidgetPicker) menu=\(model.contextMenuPoint != nil) surface=\(model.surfaceMenu != nil)")
+        debugLog("dismissTopmost picking=\(model.websites.contains(where: { $0.isPickingElements })) configuring=\(model.configuring != nil)")
+        if let picking = model.websites.first(where: { $0.isPickingElements }) {
+            picking.setPicking(false)
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.84)) { model.configuring = picking }
+        } else if let site = model.configuring {
             if site.isPickingElements {
                 site.setPicking(false)
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.84)) { model.configuring = site }
@@ -2164,12 +1843,17 @@ private struct SeeOverlay: View {
 
     private func openApplication(_ bundleID: String) {
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return }
-        let name = NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == bundleID }?.localizedName
-            ?? url.deletingPathExtension().lastPathComponent
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
         withAnimation(.easeOut(duration: 0.18)) { model.showingWidgetPicker = false }
-        let workspaceSize = NSScreen.main?.frame.size ?? CGSize(width: 1440, height: 900)
-        model.addApp(bundleID, name: name, in: workspaceSize, rect: model.pendingPickerForRect)
-        model.pendingPickerForRect = nil
+        NSApp.deactivate()
+        hideSeeWindow()
+        NSWorkspace.shared.openApplication(at: url, configuration: config) { app, error in
+            guard let app else { debugLog("open app failed \(String(describing: error))"); return }
+            Task { @MainActor in
+                app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            }
+        }
     }
 
     private func hideSeeWindow() {
@@ -2205,10 +1889,6 @@ private struct SeeOverlay: View {
             let c = siteCenter(site, index: i, size: size)
             if CGRect(x: c.x - site.size.width/2, y: c.y - site.size.height/2,
                       width: site.size.width, height: site.size.height).contains(pt) { return true }
-        }
-        for surface in model.apps {
-            if CGRect(x: surface.center.x - surface.size.width/2, y: surface.center.y - surface.size.height/2,
-                      width: surface.size.width, height: surface.size.height).contains(pt) { return true }
         }
         for (i, widget) in model.widgets.enumerated() {
             let c = widgetCenter(widget, index: i, size: size)
@@ -2416,6 +2096,7 @@ private final class WidgetDragView: NSView {
     override func mouseExited(with event: NSEvent) {
         let local = convert(event.locationInWindow, from: nil)
         guard !bounds.contains(local) else { return }
+        NSCursor.arrow.set()
         onHoverChange?(false)
         onMoveActive?(false); onResizeActive?(false)
     }
@@ -2439,6 +2120,11 @@ private final class WidgetDragView: NSView {
         let nearMove = moveRect.insetBy(dx: -24, dy: -12).contains(pt)
         let nearResize = resizeRect.insetBy(dx: -16, dy: -16).contains(pt)
         onMoveActive?(nearMove); onResizeActive?(nearResize)
+        if moveRect.contains(pt) { NSCursor.openHand.set() }
+        else if resizeRect.contains(pt) { seeResizeCursor().set() }
+        else if nearResize { seeResizeCursor().set() }
+        else if nearMove { NSCursor.openHand.set() }
+        else { NSCursor.arrow.set() }
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -2589,15 +2275,15 @@ private struct NativeWidgetView: View {
 
 @MainActor
 private struct WorkspaceContextMenu: View {
-    let onAdd: () -> Void; let onTidy: () -> Void; let onArrange: () -> Void
+    let onAdd: () -> Void; let onTidy: () -> Void
     let onBackground: () -> Void; let onSettings: () -> Void; let onRemoveAll: () -> Void
+    @ObservedObject private var hover = MenuHover.shared
 
     var body: some View {
-        VStack(spacing: 2) {
+        VStack(spacing: 1) {
             menuRow("Add New Widgets…", symbol: "rectangle.stack.badge.plus", action: onAdd)
             sep
             menuRow("Tidy Layout", symbol: "sparkles", action: onTidy)
-            menuRow("Arrange Layout…", symbol: "square.grid.2x2", action: onArrange)
             sep
             menuRow("Customize Background…", symbol: "circle.lefthalf.filled", action: onBackground)
             sep
@@ -2605,24 +2291,74 @@ private struct WorkspaceContextMenu: View {
             sep
             menuRow("Remove All Widgets…", symbol: "trash", action: onRemoveAll, destructive: true)
         }
-        .padding(7).frame(width: 256)
-        .background(Color(white: 0.14).opacity(0.97), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(.white.opacity(0.14), lineWidth: 1))
-        .shadow(color: .black.opacity(0.38), radius: 22, y: 10)
+        .padding(6).frame(width: 256)
+        .background(GlassMenuBackground())
     }
 
     private var sep: some View {
-        Rectangle().fill(.white.opacity(0.13)).frame(height: 1).padding(.horizontal, 8).padding(.vertical, 3)
+        Rectangle().fill(.white.opacity(0.10)).frame(height: 1).padding(.horizontal, 8).padding(.vertical, 3)
     }
 
     private func menuRow(_ title: String, symbol: String, action: @escaping () -> Void, destructive: Bool = false) -> some View {
-        Button(action: action) {
+        let key = "ws:" + title
+        return Button(action: action) {
             Label(title, systemImage: symbol)
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(destructive ? Color.red.opacity(0.9) : Color.white.opacity(0.92))
+                .foregroundStyle(destructive ? Color.red.opacity(0.92) : Color.white.opacity(0.94))
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 9).frame(height: 31).contentShape(Rectangle())
-        }.buttonStyle(.plain)
+                .padding(.horizontal, 9).frame(height: 28).contentShape(Rectangle())
+                .background(hover.row == key ? Color.white.opacity(0.16) : .clear,
+                            in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .background(GeometryReader { proxy in
+                    Color.clear.onAppear { hover.register(key, proxy.frame(in: .global)) }
+                        .onChange(of: proxy.frame(in: .global)) { _, new in hover.register(key, new) }
+                })
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Hover tracking for the glass menus. SwiftUI hover does not fire while See's
+/// non-activating panel is not key, so the app's global pointer watch drives it
+/// from screen coordinates instead.
+@MainActor
+private final class MenuHover: ObservableObject {
+    static let shared = MenuHover()
+    @Published var row: String?
+
+    private var frames: [String: CGRect] = [:]
+
+    func register(_ id: String, _ frame: CGRect) {
+        if frame.width < 2 || frame.height < 2 { return }
+        if frames[id] != frame { frames[id] = frame }
+    }
+
+    func clear(_ prefix: String) {
+        for key in frames.keys where key.hasPrefix(prefix) { frames.removeValue(forKey: key) }
+        if let row, row.hasPrefix(prefix) { self.row = nil }
+    }
+
+    func update(point: CGPoint) {
+        var hit: String?
+        for (id, frame) in frames where frame.contains(point) { hit = id }
+        if hit != row { row = hit }
+    }
+}
+
+/// macOS-style frosted panel: a real blur of what is behind the panel.
+private struct GlassMenuBackground: View {
+    var body: some View {
+        RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(.ultraThinMaterial)
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.white.opacity(0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Color.white.opacity(0.16), lineWidth: 0.8)
+            )
+            .shadow(color: .black.opacity(0.32), radius: 20, y: 9)
     }
 }
 
@@ -2765,11 +2501,11 @@ private struct WidgetPickerOverlay: View {
                         Image(systemName: app.symbol).font(.system(size: 15)).foregroundStyle(.white.opacity(0.84)).frame(width: 24)
                         Text(app.name).font(.system(size: 13, weight: .medium)).foregroundStyle(.white.opacity(0.88))
                         Spacer()
-                        Text("Add").font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(0.55))
+                        Text("Open app").font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(0.55))
                     }.padding(.vertical, 8).contentShape(Rectangle())
                 }.buttonStyle(.plain)
             }
-            Text("Apps appear live inside your workspace. You can click and scroll them right here.")
+            Text("Apps open in their own window. See steps aside so you can use them.")
                 .font(.system(size: 11))
                 .foregroundStyle(.white.opacity(0.40))
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -2789,46 +2525,75 @@ private struct WidgetPickerOverlay: View {
 private struct WorkspaceOptionsOverlay: View {
     let panel: WorkspacePanel
     @Binding var backgroundStyle: WorkspaceBackgroundStyle
+    @Binding var glow: Double
+    @Binding var dim: Double
     let onClose: () -> Void
-    let onArrange: (LayoutStyle) -> Void
 
     private var title: String {
-        switch panel { case .arrange: "Arrange Layout"; case .background: "Customize Background"; case .settings: "See Settings" }
+        switch panel { case .background: "Customize Background"; case .settings: "See Settings" }
     }
 
     var body: some View {
         ZStack {
             Color.black.opacity(0.24).ignoresSafeArea().onTapGesture(perform: onClose)
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 16) {
                 HStack {
                     Text(title).font(.system(size: 15, weight: .semibold))
                     Spacer()
                     Button(action: onClose) { Image(systemName: "xmark").foregroundStyle(.white.opacity(0.6)) }.buttonStyle(.plain)
                 }
                 switch panel {
-                case .arrange:
-                    Button("Grid", systemImage: "square.grid.2x2") { onArrange(.grid) }.buttonStyle(.bordered)
-                    Button("Cascade", systemImage: "square.on.square") { onArrange(.cascade) }.buttonStyle(.bordered)
                 case .background:
-                    ForEach(Array(WorkspaceBackgroundStyle.allCases.enumerated()), id: \.offset) { _, style in
-                        Button { backgroundStyle = style } label: {
-                            HStack {
-                                Circle().fill(style.tint).frame(width: 20, height: 20)
-                                Text(style.title); Spacer()
-                                if backgroundStyle == style { Image(systemName: "checkmark") }
-                            }.foregroundStyle(.white.opacity(0.9))
-                        }.buttonStyle(.plain)
+                    Text("Palette").font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(0.42))
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
+                        ForEach(WorkspaceBackgroundStyle.allCases) { style in
+                            Button { backgroundStyle = style } label: {
+                                VStack(spacing: 7) {
+                                    ZStack {
+                                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                            .fill(style.base)
+                                        RadialGradient(colors: [style.tint, .clear], center: .center,
+                                                       startRadius: 2, endRadius: 40)
+                                        if backgroundStyle == style {
+                                            Image(systemName: "checkmark")
+                                                .font(.system(size: 11, weight: .bold))
+                                                .foregroundStyle(.white)
+                                        }
+                                    }
+                                    .frame(height: 46)
+                                    .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                        .stroke(.white.opacity(backgroundStyle == style ? 0.85 : 0.14), lineWidth: 1))
+                                    Text(style.title).font(.system(size: 10, weight: .medium))
+                                        .foregroundStyle(.white.opacity(0.7))
+                                }
+                            }.buttonStyle(.plain)
+                        }
                     }
+                    VStack(alignment: .leading, spacing: 8) {
+                        settingLine("Glow", value: glow) { Slider(value: $glow, in: 0...1.6) }
+                        settingLine("Dim", value: dim) { Slider(value: $dim, in: 0.25...0.95) }
+                    }
+                    .padding(.top, 4)
                 case .settings:
                     Text("See keeps your websites and widgets in a freeform workspace.")
                         .font(.system(size: 12)).foregroundStyle(.white.opacity(0.65))
                 }
             }
-            .padding(20).frame(width: 340)
-            .background(Color(white: 0.13).opacity(0.97), in: RoundedRectangle(cornerRadius: 18))
-            .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.15), lineWidth: 1))
+            .padding(20).frame(width: 380)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(.white.opacity(0.16), lineWidth: 0.8))
+            .shadow(color: .black.opacity(0.34), radius: 26, y: 12)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func settingLine<Content: View>(_ label: String, value: Double, @ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: 12) {
+            Text(label).font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.8)).frame(width: 46, alignment: .leading)
+            content()
+            Text(String(format: "%.0f%%", value * 100))
+                .font(.system(size: 10, design: .monospaced)).foregroundStyle(.white.opacity(0.45)).frame(width: 38, alignment: .trailing)
+        }
     }
 }
 
@@ -2838,14 +2603,14 @@ private struct WorkspaceOptionsOverlay: View {
 private struct SurfaceContextMenu: View {
     let title: String
     let isWebsite: Bool
-    var isApp: Bool = false
     let onConfigure: () -> Void
     let onReload: () -> Void
     let onOpenInBrowser: () -> Void
     let onRemove: () -> Void
+    @ObservedObject private var hover = MenuHover.shared
 
     var body: some View {
-        VStack(spacing: 2) {
+        VStack(spacing: 1) {
             Text(title)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.42))
@@ -2858,31 +2623,33 @@ private struct SurfaceContextMenu: View {
                 row("Reload", "arrow.clockwise", onReload)
                 row("Open in Browser", "safari", onOpenInBrowser)
                 sep
-            } else if isApp {
-                row("Refresh Mirror", "arrow.clockwise", onReload)
-                row("Open App", "arrow.up.forward.app", onOpenInBrowser)
-                sep
             }
             row("Remove Widget", "trash", onRemove, destructive: true)
         }
-        .padding(7).frame(width: 232)
-        .background(Color(white: 0.14).opacity(0.97), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(.white.opacity(0.14), lineWidth: 1))
-        .shadow(color: .black.opacity(0.38), radius: 20, y: 9)
+        .padding(6).frame(width: 232)
+        .background(GlassMenuBackground())
     }
 
     private var sep: some View {
-        Rectangle().fill(.white.opacity(0.13)).frame(height: 1).padding(.horizontal, 8).padding(.vertical, 3)
+        Rectangle().fill(.white.opacity(0.10)).frame(height: 1).padding(.horizontal, 8).padding(.vertical, 3)
     }
 
     private func row(_ title: String, _ symbol: String, _ action: @escaping () -> Void, destructive: Bool = false) -> some View {
-        Button(action: action) {
+        let key = "sf:" + title
+        return Button(action: action) {
             Label(title, systemImage: symbol)
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(destructive ? Color.red.opacity(0.9) : Color.white.opacity(0.92))
+                .foregroundStyle(destructive ? Color.red.opacity(0.92) : Color.white.opacity(0.94))
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 9).frame(height: 30).contentShape(Rectangle())
-        }.buttonStyle(.plain)
+                .padding(.horizontal, 9).frame(height: 28).contentShape(Rectangle())
+                .background(hover.row == key ? Color.white.opacity(0.16) : .clear,
+                            in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .background(GeometryReader { proxy in
+                    Color.clear.onAppear { hover.register(key, proxy.frame(in: .global)) }
+                        .onChange(of: proxy.frame(in: .global)) { _, new in hover.register(key, new) }
+                })
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -2984,19 +2751,30 @@ private struct ConfigureWidgetOverlay: View {
                                     Spacer(minLength: 4)
                                     Button {
                                         site.config.hiddenSelectors.removeAll { $0 == selector }
+                                        debugLog("unhide \(selector)")
                                         site.applyTuning(reload: false)
                                     } label: {
                                         Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
                                             .foregroundStyle(.white.opacity(0.6))
+                                            .frame(width: 18, height: 18)
+                                            .contentShape(Rectangle())
                                     }.buttonStyle(.plain)
                                 }
                                 .padding(.horizontal, 10).padding(.vertical, 8)
                                 .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+                                .contentShape(RoundedRectangle(cornerRadius: 8))
+                                // Clicking anywhere on the row restores the element.
+                                .onTapGesture {
+                                    site.config.hiddenSelectors.removeAll { $0 == selector }
+                                    debugLog("unhide row \(selector)")
+                                    site.applyTuning(reload: false)
+                                }
                             }
                             HStack {
                                 Spacer()
                                 Button {
                                     site.config.hiddenSelectors.removeAll()
+                                    debugLog("unhide all")
                                     site.applyTuning(reload: false)
                                 } label: {
                                     Text("Clear all").font(.system(size: 11, weight: .semibold))
@@ -3099,7 +2877,6 @@ private struct ChromeOverlay: View {
                     WorkspaceContextMenu(
                         onAdd: { withAnimation { model.contextMenuPoint = nil; model.pickerCategory = .websites; model.showingWidgetPicker = true } },
                         onTidy: { withAnimation { model.contextMenuPoint = nil }; model.tidyLayout(in: size) },
-                        onArrange: { withAnimation { model.contextMenuPoint = nil; model.workspacePanel = .arrange } },
                         onBackground: { withAnimation { model.contextMenuPoint = nil; model.workspacePanel = .background } },
                         onSettings: { withAnimation { model.contextMenuPoint = nil; model.workspacePanel = .settings } },
                         onRemoveAll: { withAnimation { model.contextMenuPoint = nil; model.confirmingRemoveAll = true } }
@@ -3110,9 +2887,8 @@ private struct ChromeOverlay: View {
 
                 if let menu = model.surfaceMenu {
                     SurfaceContextMenu(
-                        title: menu.site?.title ?? menu.app?.appName ?? menu.widget.map { $0.kind.rawValue } ?? "Widget",
+                        title: menu.site?.title ?? menu.widget.map { $0.kind.rawValue } ?? "Widget",
                         isWebsite: menu.site != nil,
-                        isApp: menu.app != nil,
                         onConfigure: {
                             if let site = menu.site {
                                 withAnimation(.spring(response: 0.3, dampingFraction: 0.84)) {
@@ -3123,16 +2899,11 @@ private struct ChromeOverlay: View {
                             }
                         },
                         onReload: {
-                            if let app = menu.app { app.start() }
                             menu.site?.reload()
                             withAnimation { model.surfaceMenu = nil }
                         },
                         onOpenInBrowser: {
-                            if let app = menu.app {
-                                NSWorkspace.shared.runningApplications
-                                    .first { $0.bundleIdentifier == app.bundleID }?
-                                    .activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-                            } else if let site = menu.site, let url = URL(string: site.address) {
+                            if let site = menu.site, let url = URL(string: site.address) {
                                 NSWorkspace.shared.open(url)
                             }
                             withAnimation { model.surfaceMenu = nil }
@@ -3140,7 +2911,6 @@ private struct ChromeOverlay: View {
                         onRemove: {
                             if let site = menu.site { model.remove(site) }
                             if let widget = menu.widget { model.removeWidget(widget) }
-                            if let app = menu.app { model.removeApp(app) }
                             withAnimation { model.surfaceMenu = nil }
                         }
                     )
@@ -3167,8 +2937,9 @@ private struct ChromeOverlay: View {
                     WorkspaceOptionsOverlay(
                         panel: panel,
                         backgroundStyle: $model.backgroundStyle,
-                        onClose: { withAnimation { model.workspacePanel = nil } },
-                        onArrange: { style in withAnimation { model.tidyLayout(in: size, style: style); model.workspacePanel = nil } }
+                        glow: $model.backgroundGlow,
+                        dim: $model.backgroundDim,
+                        onClose: { withAnimation { model.workspacePanel = nil } }
                     )
                     .frame(width: size.width, height: size.height)
                 }
@@ -3189,7 +2960,8 @@ private struct ChromeOverlay: View {
         }
         .ignoresSafeArea()
         .preferredColorScheme(.dark)
-        .onReceive(NotificationCenter.default.publisher(for: .seeEscape)) { _ in dismissChrome() }
+        // Escape is handled once, by SeeOverlay.dismissTopmost — handling it here
+        // as well closed the config panel and the whole peek from one key press.
     }
 
     private func dismissChrome() {
@@ -3219,12 +2991,17 @@ private struct ChromeOverlay: View {
 
     private func openApplication(_ bundleID: String) {
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return }
-        let name = NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == bundleID }?.localizedName
-            ?? url.deletingPathExtension().lastPathComponent
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
         withAnimation(.easeOut(duration: 0.18)) { model.showingWidgetPicker = false }
-        let workspaceSize = NSScreen.main?.frame.size ?? CGSize(width: 1440, height: 900)
-        model.addApp(bundleID, name: name, in: workspaceSize)
-        model.pendingPickerForRect = nil
+        NSApp.deactivate()
+        onCloseOverlay()
+        NSWorkspace.shared.openApplication(at: url, configuration: config) { app, error in
+            guard let app else { debugLog("open app failed \(String(describing: error))"); return }
+            Task { @MainActor in
+                app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            }
+        }
     }
 
     private func menuCenter(for point: CGPoint, size: CGSize, menu: CGSize) -> CGPoint {
