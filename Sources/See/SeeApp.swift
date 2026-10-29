@@ -287,8 +287,9 @@ private struct MenuSizeReader: ViewModifier {
     let onChange: (CGSize) -> Void
     func body(content: Content) -> some View {
         content.background(GeometryReader { proxy in
-            Color.clear.onAppear { onChange(proxy.size) }
-                .onChange(of: proxy.size) { _, size in onChange(size) }
+            Color.clear
+                .onAppear { DispatchQueue.main.async { onChange(proxy.size) } }
+                .onChange(of: proxy.size) { _, size in DispatchQueue.main.async { onChange(size) } }
         })
     }
 }
@@ -323,7 +324,55 @@ private final class OverlayModel: ObservableObject {
     @Published var confirmingRemoveAll = false
     @Published var dragCreatingRect: CGRect = .null      // live drawing rect
     @Published var surfaceMenu: SurfaceMenuTarget?
-    @Published var configuring: WebsiteSurface?
+    /// The surface whose settings panel is open. Opening it slides that surface
+    /// to the left so the panel can sit on the right without covering it (the
+    /// Peek arrangement); closing puts it back where it was.
+    @Published var configuring: WebsiteSurface? {
+        didSet {
+            guard configuring !== oldValue else { return }
+            if let previous = oldValue { restoreConfigured(previous) }
+            if let site = configuring { makeRoomForConfigure(site) }
+        }
+    }
+
+    /// Workspace size, kept current by the overlay so the layout maths above has
+    /// something to work with.
+    var workspaceSize: CGSize = CGSize(width: 1710, height: 1107)
+    private var configureOrigins: [UUID: CGPoint] = [:]
+    private var configureSizes: [UUID: CGSize] = [:]
+
+    private func configureSlot(for site: WebsiteSurface) -> (center: CGPoint, size: CGSize) {
+        let size = workspaceSize
+        let usable = CGRect(x: 34, y: 92, width: max(240, size.width - 68), height: max(240, size.height - 168))
+        let leftRegion = CGRect(x: usable.minX, y: usable.minY,
+                                width: usable.width * 0.52 - 10, height: usable.height)
+        var w = site.size.width, h = site.size.height
+        let fit = min(1, min((leftRegion.width - 24) / max(1, w), (leftRegion.height - 24) / max(1, h)))
+        w *= fit; h *= fit
+        return (CGPoint(x: leftRegion.midX, y: leftRegion.midY), CGSize(width: w, height: h))
+    }
+
+    private func makeRoomForConfigure(_ site: WebsiteSurface) {
+        let slot = configureSlot(for: site)
+        if configureOrigins[site.id] == nil {
+            configureOrigins[site.id] = site.center
+            configureSizes[site.id] = site.size
+        }
+        withAnimation(.spring(response: 0.36, dampingFraction: 0.82)) {
+            site.size = slot.size
+            site.center = slot.center
+        }
+    }
+
+    private func restoreConfigured(_ site: WebsiteSurface) {
+        guard let origin = configureOrigins[site.id] else { return }
+        let size = configureSizes[site.id] ?? site.size
+        configureOrigins[site.id] = nil; configureSizes[site.id] = nil
+        withAnimation(.spring(response: 0.36, dampingFraction: 0.82)) {
+            site.size = size
+            site.center = origin
+        }
+    }
 
     var chromeVisible: Bool {
         showingWidgetPicker || contextMenuPoint != nil || surfaceMenu != nil
@@ -1674,6 +1723,16 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
                 debugLog("hide cleared, css length=\(String(describing: value))")
             }
         }
+        // While a panel is open the surface is a still image; hiding or restoring
+        // elements would otherwise stay invisible until the snapshot is retaken.
+        if chromeSnapshot != nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                guard let self, self.chromeSnapshot != nil else { return }
+                self.chromeSnapshot = nil
+                self.enterChromeMode()
+                debugLog("chrome snapshot refreshed")
+            }
+        }
         installUserScripts(in: webView)
         refreshChromeSnapshot()
     }
@@ -2243,8 +2302,11 @@ private struct SeeOverlay: View {
                         withAnimation(.easeOut(duration: 0.16)) {
                             model.contextMenuPoint = nil; model.surfaceMenu = nil
                         }
-                        // Clicking away from a zapping surface ends the session:
-                        // picking had no other way out than Escape.
+                        // Clicking away from a zapping surface ends the session,
+                        // but the settings panel lives outside that surface and
+                        // must stay usable.
+                        let panelStrip = CGRect(x: size.width - 520, y: 0, width: 520, height: size.height)
+                        if panelStrip.contains(point) { return }
                         for site in model.websites where site.isPickingElements {
                             let rect = CGRect(x: site.center.x - site.size.width / 2,
                                               y: site.center.y - site.size.height / 2,
@@ -2277,6 +2339,7 @@ private struct SeeOverlay: View {
                 .frame(width: size.width, height: size.height)
                 .allowsHitTesting(false)
             }
+            .onChange(of: size) { _, new in model.workspaceSize = new }
             .onChange(of: model.chromeVisible) { _, visible in
                 for site in model.websites {
                     // A surface being zapped must stay live: the snapshot would
@@ -2286,6 +2349,7 @@ private struct SeeOverlay: View {
             }
             .onAppear {
                 pointer.start { globalPoint in routeHover(globalPoint) }
+                model.workspaceSize = size
                 debugLog("overlay appear active=\(NSApp.isActive) key=\(String(describing: NSApp.keyWindow?.title))")
                 setAppeared(true)
                 guard !model.hasPlacedInitialSite else { return }
@@ -2891,8 +2955,9 @@ private struct WorkspaceContextMenu: View {
                 .background(hover.row == key ? Color.white.opacity(0.16) : .clear,
                             in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                 .background(GeometryReader { proxy in
-                    Color.clear.onAppear { hover.register(key, proxy.frame(in: .global)) }
-                        .onChange(of: proxy.frame(in: .global)) { _, new in hover.register(key, new) }
+                    Color.clear
+                        .onAppear { DispatchQueue.main.async { hover.register(key, proxy.frame(in: .global)) } }
+                        .onChange(of: proxy.frame(in: .global)) { _, new in DispatchQueue.main.async { hover.register(key, new) } }
                 })
         }
         .buttonStyle(.plain)
@@ -3197,8 +3262,9 @@ private struct SurfaceContextMenu: View {
                 .background(hover.row == key ? Color.white.opacity(0.16) : .clear,
                             in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                 .background(GeometryReader { proxy in
-                    Color.clear.onAppear { hover.register(key, proxy.frame(in: .global)) }
-                        .onChange(of: proxy.frame(in: .global)) { _, new in hover.register(key, new) }
+                    Color.clear
+                        .onAppear { DispatchQueue.main.async { hover.register(key, proxy.frame(in: .global)) } }
+                        .onChange(of: proxy.frame(in: .global)) { _, new in DispatchQueue.main.async { hover.register(key, new) } }
                 })
         }
         .buttonStyle(.plain)
@@ -3217,12 +3283,13 @@ private struct ConfigureWidgetOverlay: View {
     private let dim = Color.white.opacity(0.45)
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: .trailing) {
             Color.black.opacity(0.10).ignoresSafeArea()
                 .allowsHitTesting(!site.isPickingElements)
                 .onTapGesture { if !site.isPickingElements { onDone() } }
             panel
                 .frame(width: 460)
+                .padding(.trailing, 44)
                 .transition(.opacity.combined(with: .scale(scale: 0.98)))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -3336,12 +3403,22 @@ private struct ConfigureWidgetOverlay: View {
                             HStack {
                                 Spacer()
                                 Button {
+                                    let previous = site.config.hiddenSelectors
                                     site.config.hiddenSelectors.removeAll()
                                     debugLog("unhide all")
                                     site.applyTuning(reload: false)
+                                    if let first = previous.first {
+                                        let quoted = "\(first.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'"))"
+                                        let js = "var els=document.querySelectorAll('\(quoted)'); els.length + ' x display=' + (els[0] ? getComputedStyle(els[0]).display : 'none-found')" 
+                                        site.webView?.evaluateJavaScript(js) { value, _ in
+                                            debugLog("after clear all: \(String(describing: value))")
+                                        }
+                                    }
                                 } label: {
                                     Text("Clear all").font(.system(size: 11, weight: .semibold))
                                         .foregroundStyle(dim)
+                                        .padding(.horizontal, 8).padding(.vertical, 5)
+                                        .contentShape(Rectangle())
                                 }.buttonStyle(.plain)
                             }
                         }
