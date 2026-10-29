@@ -126,6 +126,8 @@ private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
     private var fnLocal: Any?
     private var fnHeld = false
     private var openedByFn = false
+    private var fnPinned = false
+    private var lastFnRelease = Date.distantPast
 
     /// Hold Fn anywhere to peek; release it and See disappears. The menu bar eye
     /// still works for a click-to-open peek.
@@ -147,16 +149,35 @@ private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
     private func functionKeyChanged(_ down: Bool) {
         guard down != fnHeld else { return }
         fnHeld = down
+        let now = Date()
+
         if down {
-            openedByFn = true
+            // A quick second tap pins the peek open instead of being hold-to-peek.
+            if now.timeIntervalSince(lastFnRelease) < 0.45 {
+                fnPinned.toggle()
+                debugLog("fn double tap -> pinned=\(fnPinned)")
+                if fnPinned {
+                    openedByFn = false
+                    if panel?.isVisible != true { showPanel() }
+                } else {
+                    openedByFn = false
+                    hidePanel()
+                }
+                return
+            }
+            openedByFn = !fnPinned
             if panel?.isVisible != true {
                 debugLog("fn held -> peek")
                 showPanel()
             }
-        } else if openedByFn {
-            openedByFn = false
-            debugLog("fn released -> hide")
-            hidePanel()
+        } else {
+            lastFnRelease = now
+            if fnPinned { return }
+            if openedByFn {
+                openedByFn = false
+                debugLog("fn released -> hide")
+                hidePanel()
+            }
         }
     }
 
@@ -2885,9 +2906,9 @@ private struct WebsiteSurfaceView: View {
 /// material only blends with what is inside the window, so See's own dim layer
 /// and gradient tinted every widget; this reads the real background instead.
 private struct BehindWindowGlass: NSViewRepresentable {
-    var material: NSVisualEffectView.Material = .underWindowBackground
-    /// Light scrim: the glass stays readable without going flat.
-    var scrim: Double = 0.04
+    var material: NSVisualEffectView.Material = .hudWindow
+    /// Black tint over the blur: pitch black, still see-through.
+    var scrim: Double = 0.38
 
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
