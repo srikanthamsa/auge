@@ -201,6 +201,13 @@ final class WorkspaceInteractionView: NSView {
 
 // MARK: - Model
 
+private struct SurfaceMenuTarget: Identifiable {
+    let id = UUID()
+    let site: WebsiteSurface?
+    let widget: NativeWidgetSurface?
+    let point: CGPoint
+}
+
 @MainActor
 private final class OverlayModel: ObservableObject {
     @Published var websites: [WebsiteSurface] = []
@@ -216,8 +223,88 @@ private final class OverlayModel: ObservableObject {
     @Published var backgroundStyle: WorkspaceBackgroundStyle = .midnight
     @Published var confirmingRemoveAll = false
     @Published var dragCreatingRect: CGRect = .null      // live drawing rect
+    @Published var surfaceMenu: SurfaceMenuTarget?
+    @Published var configuring: WebsiteSurface?
 
-    init() { } // No pre-seeded sites
+    private var lastSavedJSON = ""
+    private var autosaveStarted = false
+
+    init() {
+        restore()
+        startAutosave()
+    }
+
+    // MARK: Persistence
+
+    func snapshot() -> WorkspaceSnapshot {
+        WorkspaceSnapshot(websites: websites.map(\.snapshot),
+                          widgets: widgets.map(\.snapshot),
+                          background: backgroundStyle.rawValue)
+    }
+
+    private func restore() {
+        guard let saved = WorkspaceStore.load() else { return }
+        backgroundStyle = WorkspaceBackgroundStyle(rawValue: saved.background) ?? .midnight
+        websites = saved.websites.map { item in
+            WebsiteSurface(address: item.address, title: item.title,
+                           center: CGPoint(x: item.x, y: item.y), id: item.id,
+                           size: CGSize(width: item.w, height: item.h),
+                           config: item.config, scrollY: item.scrollY)
+        }
+        widgets = saved.widgets.compactMap { item in
+            guard let kind = NativeWidgetKind(rawValue: item.kind) else { return nil }
+            return NativeWidgetSurface(kind: kind, center: CGPoint(x: item.x, y: item.y), id: item.id,
+                                       size: CGSize(width: item.w, height: item.h), note: item.note)
+        }
+        if !websites.isEmpty || !widgets.isEmpty { hasPlacedInitialSite = true }
+        debugLog("restored \(websites.count) sites, \(widgets.count) widgets")
+    }
+
+    private func startAutosave() {
+        guard !autosaveStarted else { return }
+        autosaveStarted = true
+        Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_200_000_000)
+                self?.saveIfNeeded()
+            }
+        }
+    }
+
+    func saveIfNeeded() {
+        let snapshot = snapshot()
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(snapshot), let json = String(data: data, encoding: .utf8) else { return }
+        guard json != lastSavedJSON else { return }
+        if WorkspaceStore.save(snapshot) { lastSavedJSON = json }
+    }
+
+    func saveNow() { lastSavedJSON = ""; saveIfNeeded() }
+
+    // MARK: Surface hit testing
+
+    func website(at point: CGPoint) -> WebsiteSurface? {
+        websites.last { site in
+            CGRect(x: site.center.x - site.size.width / 2, y: site.center.y - site.size.height / 2,
+                   width: site.size.width, height: site.size.height).contains(point)
+        }
+    }
+
+    func widget(at point: CGPoint) -> NativeWidgetSurface? {
+        widgets.last { widget in
+            CGRect(x: widget.center.x - widget.size.width / 2, y: widget.center.y - widget.size.height / 2,
+                   width: widget.size.width, height: widget.size.height).contains(point)
+        }
+    }
+
+    func openSurfaceMenu(at point: CGPoint) {
+        if let site = website(at: point) {
+            surfaceMenu = SurfaceMenuTarget(site: site, widget: nil, point: point)
+        } else if let widget = widget(at: point) {
+            surfaceMenu = SurfaceMenuTarget(site: nil, widget: widget, point: point)
+        }
+    }
 
     // MARK: Smart placement: find an empty region
     func emptyCenter(for size: CGSize, in workspace: CGSize) -> CGPoint {
@@ -383,7 +470,7 @@ private enum WidgetPickerCategory: String, CaseIterable, Identifiable {
 
 private enum LayoutStyle { case grid, cascade }
 private enum WorkspacePanel { case arrange, background, settings }
-private enum WorkspaceBackgroundStyle: CaseIterable {
+private enum WorkspaceBackgroundStyle: String, CaseIterable {
     case midnight, charcoal, plum
     var title: String { switch self { case .midnight: "Midnight"; case .charcoal: "Charcoal"; case .plum: "Plum" } }
     var tint: Color { switch self { case .midnight: Color.indigo.opacity(0.17); case .charcoal: Color.gray.opacity(0.16); case .plum: Color.purple.opacity(0.2) } }
@@ -394,22 +481,278 @@ private struct SelectableApp: Identifiable {
     var id: String { bundleID }
 }
 
+// MARK: - Per-widget configuration
+
+private enum WebsiteUserAgent: String, CaseIterable, Codable, Identifiable {
+    case chromeMac, safariMac, iPhone, iPad
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .chromeMac: "Chrome (macOS)"
+        case .safariMac: "Safari (macOS)"
+        case .iPhone: "Safari (iPhone)"
+        case .iPad: "Safari (iPad)"
+        }
+    }
+    var string: String {
+        switch self {
+        case .chromeMac:
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+        case .safariMac:
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15"
+        case .iPhone:
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1"
+        case .iPad:
+            "Mozilla/5.0 (iPad; CPU OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1"
+        }
+    }
+}
+
+private struct WebsiteConfig: Codable, Equatable {
+    var autoRefresh: Double = 0            // seconds, 0 = off
+    var rememberScroll = true
+    var userAgent: WebsiteUserAgent = .chromeMac
+    var hiddenSelectors: [String] = []
+    var darkMode = false
+}
+
+private enum AutoRefreshOption: Double, CaseIterable, Identifiable {
+    case off = 0, fifteen = 15, thirty = 30, minute = 60, five = 300, fifteenMin = 900
+    var id: Double { rawValue }
+    var title: String {
+        switch self {
+        case .off: "Off"
+        case .fifteen: "15s"
+        case .thirty: "30s"
+        case .minute: "1m"
+        case .five: "5m"
+        case .fifteenMin: "15m"
+        }
+    }
+}
+
+// MARK: - Persistence
+
+private struct WebsiteSnapshot: Codable {
+    var id: UUID
+    var address: String
+    var title: String
+    var x: Double, y: Double, w: Double, h: Double
+    var config: WebsiteConfig
+    var scrollY: Double
+}
+
+private struct WidgetSnapshot: Codable {
+    var id: UUID
+    var kind: String
+    var x: Double, y: Double, w: Double, h: Double
+    var note: String
+}
+
+private struct WorkspaceSnapshot: Codable {
+    var version = 1
+    var websites: [WebsiteSnapshot] = []
+    var widgets: [WidgetSnapshot] = []
+    var background: String = WorkspaceBackgroundStyle.midnight.rawValue
+}
+
+private enum WorkspaceStore {
+    static var directory: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory())
+        return base.appendingPathComponent("See", isDirectory: true)
+    }
+    static var fileURL: URL { directory.appendingPathComponent("workspace.json") }
+
+    static func load() -> WorkspaceSnapshot? {
+        guard let data = try? Data(contentsOf: fileURL) else { return nil }
+        return try? JSONDecoder().decode(WorkspaceSnapshot.self, from: data)
+    }
+
+    @discardableResult
+    static func save(_ snapshot: WorkspaceSnapshot) -> Bool {
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try encoder.encode(snapshot).write(to: fileURL, options: .atomic)
+            return true
+        } catch {
+            debugLog("workspace save failed \(error)")
+            return false
+        }
+    }
+}
+
+// MARK: - Injected page scripts
+
+private enum PageScripts {
+    static let scrollReporter = """
+    (function(){
+      if (window.__seeScrollHooked) { return; }
+      window.__seeScrollHooked = true;
+      var t = 0;
+      window.addEventListener('scroll', function(){
+        clearTimeout(t);
+        t = setTimeout(function(){
+          try { window.webkit.messageHandlers.seeScroll.postMessage(window.scrollY || 0); } catch (e) {}
+        }, 220);
+      }, true);
+    })();
+    """
+
+    static let darkMode = """
+    (function(){
+      var style = document.getElementById('__see_dark');
+      if (!style) {
+        style = document.createElement('style');
+        style.id = '__see_dark';
+        (document.head || document.documentElement).appendChild(style);
+      }
+      style.textContent = ':root{color-scheme:dark !important}html{background:#0b0b0d}body{background:transparent}'
+        + '@media (prefers-color-scheme: light){html,body{background:#0b0b0d !important;color:#eee}}';
+    })();
+    """
+
+    static func hideCSS(_ selectors: [String]) -> String {
+        let encoded = (try? JSONEncoder().encode(selectors)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        return """
+        (function(){
+          var selectors = \(encoded);
+          var css = selectors.map(function(s){ return s + '{display:none !important}' }).join('\\n');
+          function ensure(){
+            var style = document.getElementById('__see_hide');
+            if (!style) {
+              style = document.createElement('style');
+              style.id = '__see_hide';
+              (document.head || document.documentElement).appendChild(style);
+            }
+            if (style.textContent !== css) { style.textContent = css; }
+          }
+          ensure();
+          if (!window.__seeHideObserver) {
+            window.__seeHideObserver = new MutationObserver(function(){ ensure(); });
+            window.__seeHideObserver.observe(document.documentElement, { childList: true, subtree: true });
+          }
+        })();
+        """
+    }
+
+    static let picker = """
+    (function(){
+      if (window.__seePickerActive) { return; }
+      window.__seePickerActive = true;
+      var highlighted = null;
+      function clear(){
+        if (highlighted && highlighted.style) { highlighted.style.outline = ''; highlighted.style.outlineOffset = ''; }
+        highlighted = null;
+      }
+      function pathFor(el){
+        if (!el || el.nodeType !== 1) { return null; }
+        if (el.id) { return '#' + CSS.escape(el.id); }
+        var parts = [], node = el, depth = 0;
+        while (node && node.nodeType === 1 && depth < 5 && node !== document.body) {
+          var part = node.tagName.toLowerCase();
+          var parent = node.parentElement;
+          if (parent) {
+            var index = 1, sibling = node;
+            while ((sibling = sibling.previousElementSibling)) {
+              if (sibling.tagName === node.tagName) { index++; }
+            }
+            part += ':nth-of-type(' + index + ')';
+          }
+          parts.unshift(part);
+          if (node.id) { parts[0] = '#' + CSS.escape(node.id); break; }
+          node = parent; depth++;
+        }
+        return parts.join(' > ');
+      }
+      window.__seePickerMove = function(e){
+        clear();
+        highlighted = e.target;
+        if (highlighted && highlighted.style) {
+          highlighted.style.outline = '2px solid #ff453a';
+          highlighted.style.outlineOffset = '-2px';
+        }
+      };
+      window.__seePickerClick = function(e){
+        e.preventDefault(); e.stopPropagation();
+        var selector = pathFor(e.target);
+        clear();
+        if (selector) { try { window.webkit.messageHandlers.seePicked.postMessage(selector); } catch (err) {} }
+      };
+      window.__seePickerKey = function(e){ if (e.key === 'Escape') { clear(); } };
+      document.addEventListener('mouseover', window.__seePickerMove, true);
+      document.addEventListener('click', window.__seePickerClick, true);
+      document.addEventListener('keydown', window.__seePickerKey, true);
+      document.documentElement.style.cursor = 'crosshair';
+    })();
+    """
+
+    static let stopPicker = """
+    (function(){
+      window.__seePickerActive = false;
+      if (window.__seePickerMove) { document.removeEventListener('mouseover', window.__seePickerMove, true); }
+      if (window.__seePickerClick) { document.removeEventListener('click', window.__seePickerClick, true); }
+      if (window.__seePickerKey) { document.removeEventListener('keydown', window.__seePickerKey, true); }
+      document.documentElement.style.cursor = '';
+    })();
+    """
+}
+
+// MARK: - Web message bridge
+
+@MainActor
+private final class SeeWebBridge: NSObject, WKScriptMessageHandler {
+    weak var site: WebsiteSurface?
+    var onPick: ((String) -> Void)?
+
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        switch message.name {
+        case "seePicked":
+            if let selector = message.body as? String { onPick?(selector) }
+        case "seeScroll":
+            if let value = message.body as? Double { site?.scrollY = value }
+            else if let value = message.body as? NSNumber { site?.scrollY = value.doubleValue }
+        default:
+            break
+        }
+    }
+}
+
+private final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
+    weak var target: SeeWebBridge?
+    init(_ target: SeeWebBridge) { self.target = target }
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        target?.userContentController(controller, didReceive: message)
+    }
+}
+
 // MARK: - Surface models
 
 @MainActor
 private final class NativeWidgetSurface: ObservableObject, Identifiable {
-    let id = UUID()
+    let id: UUID
     let kind: NativeWidgetKind
     @Published var center: CGPoint
     @Published var size: CGSize
-    @Published var note = ""
+    @Published var note: String
     @Published var isDragging = false
-    init(kind: NativeWidgetKind, center: CGPoint) { self.kind = kind; self.center = center; self.size = kind.size }
+
+    init(kind: NativeWidgetKind, center: CGPoint, id: UUID = UUID(), size: CGSize? = nil, note: String = "") {
+        self.id = id; self.kind = kind; self.center = center
+        self.size = size ?? kind.size; self.note = note
+    }
+
+    var snapshot: WidgetSnapshot {
+        WidgetSnapshot(id: id, kind: kind.rawValue,
+                       x: center.x, y: center.y, w: size.width, h: size.height, note: note)
+    }
 }
 
 @MainActor
 private final class WebsiteSurface: ObservableObject, Identifiable {
-    let id = UUID()
+    let id: UUID
     @Published var address: String
     @Published var title: String
     @Published private(set) var requestedURL: URL
@@ -418,13 +761,26 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     @Published var size: CGSize {
         didSet { debugLog("site size \(oldValue.width)x\(oldValue.height) -> \(size.width)x\(size.height)") }
     }
+    @Published var config: WebsiteConfig
+    @Published var scrollY: Double = 0
+    @Published var isPickingElements = false
     weak var webView: WKWebView?
+    private var refreshTimer: Timer?
 
-    init(address: String, title: String, center: CGPoint) {
+    init(address: String, title: String, center: CGPoint, id: UUID = UUID(),
+         size: CGSize? = nil, config: WebsiteConfig = WebsiteConfig(), scrollY: Double = 0) {
         let safe = URL(string: address) ?? URL(string: "https://example.com")!
+        self.id = id
         self.address = safe.absoluteString; self.title = title
         self.requestedURL = safe; self.center = center
-        self.size = CGSize(width: 1060, height: 790)
+        self.size = size ?? CGSize(width: 1060, height: 790)
+        self.config = config; self.scrollY = scrollY
+    }
+
+    var snapshot: WebsiteSnapshot {
+        WebsiteSnapshot(id: id, address: address, title: title,
+                        x: center.x, y: center.y, w: size.width, h: size.height,
+                        config: config, scrollY: scrollY)
     }
 
     func navigate() {
@@ -438,8 +794,86 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     }
 
     func reload() { webView?.reload() }
-}
 
+    // MARK: Tuning
+
+    /// Push the current configuration into the live web view.
+    func applyTuning(reload: Bool) {
+        guard let webView else { return }
+        webView.customUserAgent = config.userAgent.string
+        webView.appearance = config.darkMode ? NSAppearance(named: .darkAqua) : nil
+        installUserScripts(in: webView)
+        scheduleAutoRefresh()
+        applyHiddenSelectors()
+        if reload {
+            webView.reload()
+        }
+    }
+
+    func installUserScripts(in webView: WKWebView) {
+        let controller = webView.configuration.userContentController
+        controller.removeAllUserScripts()
+        if !config.hiddenSelectors.isEmpty {
+            controller.addUserScript(WKUserScript(source: PageScripts.hideCSS(config.hiddenSelectors),
+                                                  injectionTime: .atDocumentEnd, forMainFrameOnly: false))
+        }
+        if config.darkMode {
+            controller.addUserScript(WKUserScript(source: PageScripts.darkMode,
+                                                  injectionTime: .atDocumentEnd, forMainFrameOnly: false))
+        }
+        controller.addUserScript(WKUserScript(source: PageScripts.scrollReporter,
+                                              injectionTime: .atDocumentEnd, forMainFrameOnly: false))
+        if isPickingElements {
+            controller.addUserScript(WKUserScript(source: PageScripts.picker,
+                                                  injectionTime: .atDocumentEnd, forMainFrameOnly: false))
+        }
+    }
+
+    func applyHiddenSelectors() {
+        guard let webView, !config.hiddenSelectors.isEmpty else { return }
+        webView.evaluateJavaScript(PageScripts.hideCSS(config.hiddenSelectors), completionHandler: nil)
+    }
+
+    func setPicking(_ picking: Bool) {
+        guard picking != isPickingElements else { return }
+        isPickingElements = picking
+        guard let webView else { return }
+        installUserScripts(in: webView)
+        webView.evaluateJavaScript(picking ? PageScripts.picker : PageScripts.stopPicker,
+                                   completionHandler: nil)
+    }
+
+    func addHiddenSelector(_ selector: String) {
+        guard !config.hiddenSelectors.contains(selector) else { return }
+        config.hiddenSelectors.append(selector)
+        applyHiddenSelectors()
+        debugLog("hide selector \(selector)")
+    }
+
+    func didFinishLoad(in webView: WKWebView) {
+        webView.customUserAgent = config.userAgent.string
+        webView.appearance = config.darkMode ? NSAppearance(named: .darkAqua) : nil
+        if config.rememberScroll, scrollY > 0 {
+            webView.evaluateJavaScript("window.scrollTo(0, \(Int(scrollY)));", completionHandler: nil)
+        }
+        applyHiddenSelectors()
+        if isPickingElements {
+            webView.evaluateJavaScript(PageScripts.picker, completionHandler: nil)
+        }
+    }
+
+    private func scheduleAutoRefresh() {
+        refreshTimer?.invalidate(); refreshTimer = nil
+        guard config.autoRefresh > 0 else { return }
+        let timer = Timer(timeInterval: config.autoRefresh, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.webView?.reload() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        refreshTimer = timer
+    }
+
+    isolated deinit { refreshTimer?.invalidate() }
+}
 // MARK: - WebKit views
 
 @MainActor
@@ -447,6 +881,7 @@ private struct WebsiteView: NSViewRepresentable {
     @ObservedObject var site: WebsiteSurface
     let onHoverChange: (Bool) -> Void
     let onClose: () -> Void
+    let onPick: (String) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -454,12 +889,16 @@ private struct WebsiteView: NSViewRepresentable {
         let host = WebsiteHostView(site: site)
         host.onHoverChange = onHoverChange
         host.onClose = onClose
+        host.onPick = onPick
         host.webView.allowsBackForwardNavigationGestures = true
         host.webView.setValue(false, forKey: "drawsBackground")
-        host.webView.customUserAgent = WebsiteView.modernUserAgent
+        host.webView.customUserAgent = site.config.userAgent.string
+        host.webView.appearance = site.config.darkMode ? NSAppearance(named: .darkAqua) : nil
         site.webView = host.webView
+        site.installUserScripts(in: host.webView)
         context.coordinator.lastRequestID = site.requestID
         host.webView.load(URLRequest(url: site.requestedURL))
+        site.applyTuning(reload: false)
         return host
     }
 
@@ -470,6 +909,7 @@ private struct WebsiteView: NSViewRepresentable {
     func updateNSView(_ host: WebsiteHostView, context: Context) {
         host.onHoverChange = onHoverChange
         host.onClose = onClose
+        host.onPick = onPick
         site.webView = host.webView
         guard context.coordinator.lastRequestID != site.requestID else { return }
         context.coordinator.lastRequestID = site.requestID
@@ -480,20 +920,39 @@ private struct WebsiteView: NSViewRepresentable {
 }
 
 @MainActor
-private final class WebsiteHostView: NSView {
+private final class WebsiteHostView: NSView, WKNavigationDelegate {
     private let site: WebsiteSurface
-    let webView = WKWebView()
+    let webView: WKWebView
     private let handles: WebsiteHandleView
+    private let bridge = SeeWebBridge()
     var onHoverChange: ((Bool) -> Void)?
     var onClose: (() -> Void)?
+    var onPick: ((String) -> Void)? {
+        didSet { bridge.onPick = onPick }
+    }
 
     init(site: WebsiteSurface) {
-        self.site = site; handles = WebsiteHandleView(site: site)
+        self.site = site
+        handles = WebsiteHandleView(site: site)
+        let configuration = WKWebViewConfiguration()
+        let controller = WKUserContentController()
+        let handler = WeakScriptHandler(bridge)
+        controller.add(handler, name: "seePicked")
+        controller.add(handler, name: "seeScroll")
+        configuration.userContentController = controller
+        webView = WKWebView(frame: .zero, configuration: configuration)
         super.init(frame: .zero)
+        bridge.site = site
+        bridge.onPick = onPick
+        webView.navigationDelegate = self
         addSubview(webView); addSubview(handles, positioned: .above, relativeTo: webView)
     }
     required init?(coder: NSCoder) { fatalError() }
     override var isFlipped: Bool { true }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        site.didFinishLoad(in: webView)
+    }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -673,9 +1132,10 @@ private struct PlacedWebsiteView: View {
     let isFocused: Bool
     let onFocus: () -> Void
     let onClose: () -> Void
+    let onPick: (String) -> Void
 
     var body: some View {
-        WebsiteSurfaceView(site: site, isFocused: isFocused, onFocus: onFocus, onClose: onClose)
+        WebsiteSurfaceView(site: site, isFocused: isFocused, onFocus: onFocus, onClose: onClose, onPick: onPick)
             .position(x: site.center.x, y: site.center.y)
     }
 }
@@ -715,7 +1175,14 @@ private struct SeeOverlay: View {
                     PlacedWebsiteView(site: site,
                                       isFocused: model.focusedID == site.id,
                                       onFocus: { model.focusedID = site.id },
-                                      onClose: { model.remove(site) })
+                                      onClose: { model.remove(site) },
+                                      onPick: { selector in
+                                          site.addHiddenSelector(selector)
+                                          site.setPicking(false)
+                                          withAnimation(.spring(response: 0.3, dampingFraction: 0.84)) {
+                                              model.configuring = site
+                                          }
+                                      })
                         .zIndex(model.focusedID == site.id ? 2 : Double(index))
                         .transition(.asymmetric(
                             insertion: .opacity.combined(with: .scale(scale: 0.94)),
@@ -746,12 +1213,23 @@ private struct SeeOverlay: View {
             .background {
                 WorkspaceInteractionMonitor(
                     onRightClick: { pt in
-                        withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
-                            model.contextMenuPoint = pt; model.workspacePanel = nil
+                        if model.website(at: pt) != nil || model.widget(at: pt) != nil {
+                            withAnimation(.spring(response: 0.26, dampingFraction: 0.8)) {
+                                model.contextMenuPoint = nil
+                                model.workspacePanel = nil
+                                model.openSurfaceMenu(at: pt)
+                            }
+                        } else {
+                            withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
+                                model.surfaceMenu = nil
+                                model.contextMenuPoint = pt; model.workspacePanel = nil
+                            }
                         }
                     },
                     onDismiss: {
-                        withAnimation(.easeOut(duration: 0.16)) { model.contextMenuPoint = nil }
+                        withAnimation(.easeOut(duration: 0.16)) {
+                            model.contextMenuPoint = nil; model.surfaceMenu = nil
+                        }
                     },
                     isSurfaceAt: { pt in isPointOverSurface(pt, size: size) },
                     contextMenuFrame: { model.contextMenuPoint.map { contextMenuFrame(at: $0, size: size) } },
@@ -804,6 +1282,56 @@ private struct SeeOverlay: View {
                         .zIndex(10)
                     }
 
+                    if let menu = model.surfaceMenu {
+                        SurfaceContextMenu(
+                            title: menu.site?.title ?? menu.widget.map { $0.kind.rawValue } ?? "Widget",
+                            isWebsite: menu.site != nil,
+                            onConfigure: {
+                                if let site = menu.site {
+                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.84)) {
+                                        model.surfaceMenu = nil; model.configuring = site
+                                    }
+                                } else {
+                                    withAnimation { model.surfaceMenu = nil }
+                                }
+                            },
+                            onReload: {
+                                menu.site?.reload()
+                                withAnimation { model.surfaceMenu = nil }
+                            },
+                            onOpenInBrowser: {
+                                if let site = menu.site, let url = URL(string: site.address) {
+                                    NSWorkspace.shared.open(url)
+                                }
+                                withAnimation { model.surfaceMenu = nil }
+                            },
+                            onRemove: {
+                                if let site = menu.site { model.remove(site) }
+                                if let widget = menu.widget { model.removeWidget(widget) }
+                                withAnimation { model.surfaceMenu = nil }
+                            }
+                        )
+                        .position(contextMenuCenter(at: menu.point, size: size))
+                        .transition(.opacity.combined(with: .scale(scale: 0.97)))
+                        .zIndex(12)
+                    }
+
+                    if let site = model.configuring {
+                        ConfigureWidgetOverlay(
+                            site: site,
+                            onSelectElements: {
+                                withAnimation(.easeOut(duration: 0.16)) { model.configuring = nil }
+                                site.setPicking(true)
+                            },
+                            onDone: {
+                                site.setPicking(false)
+                                withAnimation(.easeOut(duration: 0.16)) { model.configuring = nil }
+                            }
+                        )
+                        .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                        .zIndex(20)
+                    }
+
                     if let panel = model.workspacePanel {
                         WorkspaceOptionsOverlay(
                             panel: panel,
@@ -817,6 +1345,8 @@ private struct SeeOverlay: View {
                 }
                 .animation(.spring(response: 0.3, dampingFraction: 0.82), value: model.showingWidgetPicker)
                 .animation(.spring(response: 0.28, dampingFraction: 0.78), value: model.contextMenuPoint != nil)
+                .animation(.spring(response: 0.26, dampingFraction: 0.8), value: model.surfaceMenu?.id)
+                .animation(.spring(response: 0.3, dampingFraction: 0.84), value: model.configuring?.id)
                 .animation(.easeInOut(duration: 0.2), value: model.workspacePanel != nil)
             }
             .confirmationDialog("Remove all widgets?", isPresented: $model.confirmingRemoveAll, titleVisibility: .visible) {
@@ -837,12 +1367,21 @@ private struct SeeOverlay: View {
     }
 
     private func dismissTopmost() {
-        if model.showingWidgetPicker {
+        if let site = model.configuring {
+            if site.isPickingElements {
+                site.setPicking(false)
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.84)) { model.configuring = site }
+            } else {
+                withAnimation(.easeOut(duration: 0.18)) { model.configuring = nil }
+            }
+        } else if model.showingWidgetPicker {
             withAnimation(.easeOut(duration: 0.18)) {
                 model.showingWidgetPicker = false
                 model.pendingPickerForRect = nil
                 model.dragCreatingRect = .null
             }
+        } else if model.surfaceMenu != nil {
+            withAnimation(.easeOut(duration: 0.16)) { model.surfaceMenu = nil }
         } else if model.contextMenuPoint != nil {
             withAnimation(.easeOut(duration: 0.16)) { model.contextMenuPoint = nil }
         } else if model.workspacePanel != nil {
@@ -992,12 +1531,20 @@ private struct WebsiteSurfaceView: View {
     let isFocused: Bool
     let onFocus: () -> Void
     let onClose: () -> Void
+    let onPick: (String) -> Void
 
     var body: some View {
-        WebsiteView(site: site, onHoverChange: { _ in }, onClose: onClose)
+        WebsiteView(site: site, onHoverChange: { _ in }, onClose: onClose, onPick: onPick)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .frame(width: site.size.width, height: site.size.height)
             .clipShape(RoundedRectangle(cornerRadius: 14))
+            .overlay {
+                if site.isPickingElements {
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(Color.red.opacity(0.85), style: StrokeStyle(lineWidth: 2, dash: [7, 5]))
+                        .allowsHitTesting(false)
+                }
+            }
             .shadow(color: .black.opacity(isFocused ? 0.38 : 0.22), radius: isFocused ? 30 : 18, y: 12)
             .onTapGesture(perform: onFocus)
     }
@@ -1298,7 +1845,10 @@ private struct WidgetPickerOverlay: View {
 
     var body: some View {
         ZStack {
-            Rectangle().fill(.ultraThinMaterial).overlay(Color.black.opacity(0.55))
+            // The workspace behind the picker already carries See's own
+            // dimming, so the picker adds no second layer — it matches the
+            // workspace exactly and stays see-through.
+            Color.clear.contentShape(Rectangle())
                 .ignoresSafeArea().onTapGesture(perform: onClose)
 
             VStack(spacing: 0) {
@@ -1477,5 +2027,235 @@ private struct WorkspaceOptionsOverlay: View {
             .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.15), lineWidth: 1))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - Surface context menu (right-click on a widget)
+
+@MainActor
+private struct SurfaceContextMenu: View {
+    let title: String
+    let isWebsite: Bool
+    let onConfigure: () -> Void
+    let onReload: () -> Void
+    let onOpenInBrowser: () -> Void
+    let onRemove: () -> Void
+
+    var body: some View {
+        VStack(spacing: 2) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.42))
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 9).padding(.top, 5).padding(.bottom, 4)
+
+            if isWebsite {
+                row("Configure Widget…", "slider.horizontal.3", onConfigure)
+                row("Reload", "arrow.clockwise", onReload)
+                row("Open in Browser", "safari", onOpenInBrowser)
+                sep
+            }
+            row("Remove Widget", "trash", onRemove, destructive: true)
+        }
+        .padding(7).frame(width: 232)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(.white.opacity(0.14), lineWidth: 1))
+        .shadow(color: .black.opacity(0.38), radius: 20, y: 9)
+    }
+
+    private var sep: some View {
+        Rectangle().fill(.white.opacity(0.13)).frame(height: 1).padding(.horizontal, 8).padding(.vertical, 3)
+    }
+
+    private func row(_ title: String, _ symbol: String, _ action: @escaping () -> Void, destructive: Bool = false) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: symbol)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(destructive ? Color.red.opacity(0.9) : Color.white.opacity(0.92))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 9).frame(height: 30).contentShape(Rectangle())
+        }.buttonStyle(.plain)
+    }
+}
+
+// MARK: - Configure widget
+
+@MainActor
+private struct ConfigureWidgetOverlay: View {
+    @ObservedObject var site: WebsiteSurface
+    let onSelectElements: () -> Void
+    let onDone: () -> Void
+
+    private let ink = Color.white.opacity(0.92)
+    private let dim = Color.white.opacity(0.45)
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.10).ignoresSafeArea().onTapGesture(perform: onDone)
+            panel
+                .frame(width: 460)
+                .transition(.opacity.combined(with: .scale(scale: 0.98)))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .preferredColorScheme(.dark)
+    }
+
+    private var panel: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Text(site.title).font(.system(size: 15, weight: .semibold)).foregroundStyle(ink)
+                Text("/").font(.system(size: 15, weight: .regular)).foregroundStyle(dim)
+                Text(URL(string: site.address)?.host?.replacingOccurrences(of: "www.", with: "") ?? "Website")
+                    .font(.system(size: 15, weight: .regular)).foregroundStyle(dim).lineLimit(1)
+                Spacer(minLength: 8)
+                Button(action: onDone) {
+                    Image(systemName: "xmark").font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.7))
+                        .frame(width: 24, height: 24).background(.white.opacity(0.1), in: Circle())
+                }.buttonStyle(.plain)
+            }
+            .padding(.horizontal, 18).padding(.top, 16).padding(.bottom, 14)
+
+            Rectangle().fill(.white.opacity(0.10)).frame(height: 1)
+
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 0) {
+                    settingRow("Auto Refresh") {
+                        Menu {
+                            ForEach(AutoRefreshOption.allCases) { option in
+                                Button(option.title) { site.config.autoRefresh = option.rawValue; site.applyTuning(reload: false) }
+                            }
+                        } label: { menuLabel(AutoRefreshOption(rawValue: site.config.autoRefresh)?.title ?? "Off") }
+                    }
+                    divider
+
+                    settingRow("Remember Scroll Position", info: "Restores where you were scrolled to when the widget reloads or See reopens.") {
+                        Toggle("", isOn: Binding(
+                            get: { site.config.rememberScroll },
+                            set: { site.config.rememberScroll = $0 }
+                        ))
+                        .toggleStyle(.switch).labelsHidden().controlSize(.small)
+                    }
+                    divider
+
+                    settingRow("User Agent") {
+                        Menu {
+                            ForEach(WebsiteUserAgent.allCases) { agent in
+                                Button(agent.title) {
+                                    site.config.userAgent = agent
+                                    site.applyTuning(reload: true)
+                                }
+                            }
+                        } label: { menuLabel(site.config.userAgent.title) }
+                    }
+                    divider
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Hide page elements").font(.system(size: 13, weight: .medium)).foregroundStyle(ink)
+                            Spacer()
+                            Button(action: onSelectElements) {
+                                Text("Select on page…").font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(ink)
+                                    .padding(.horizontal, 11).padding(.vertical, 6)
+                                    .background(.white.opacity(0.12), in: Capsule())
+                            }.buttonStyle(.plain)
+                        }
+                        if site.config.hiddenSelectors.isEmpty {
+                            Text("Nothing hidden yet. Click any element on the page to hide it.")
+                                .font(.system(size: 11)).foregroundStyle(dim)
+                        } else {
+                            ForEach(site.config.hiddenSelectors, id: \.self) { selector in
+                                HStack(spacing: 8) {
+                                    Text(selector)
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundStyle(ink.opacity(0.85))
+                                        .lineLimit(1).truncationMode(.middle)
+                                    Spacer(minLength: 4)
+                                    Button {
+                                        site.config.hiddenSelectors.removeAll { $0 == selector }
+                                        site.applyTuning(reload: false)
+                                    } label: {
+                                        Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
+                                            .foregroundStyle(.white.opacity(0.6))
+                                    }.buttonStyle(.plain)
+                                }
+                                .padding(.horizontal, 10).padding(.vertical, 8)
+                                .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+                            }
+                            HStack {
+                                Spacer()
+                                Button {
+                                    site.config.hiddenSelectors.removeAll()
+                                    site.applyTuning(reload: false)
+                                } label: {
+                                    Text("Clear all").font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(dim)
+                                }.buttonStyle(.plain)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 18).padding(.vertical, 13)
+
+                    divider
+
+                    settingRow("Dark mode", info: "Experimental. Forces dark colours and controls on the page.") {
+                        HStack(spacing: 6) {
+                            Text("Experimental").font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(dim)
+                            Toggle("", isOn: Binding(
+                                get: { site.config.darkMode },
+                                set: { site.config.darkMode = $0; site.applyTuning(reload: false) }
+                            ))
+                            .toggleStyle(.switch).labelsHidden().controlSize(.small)
+                        }
+                    }
+                }
+            }
+            .frame(maxHeight: 420)
+
+            Rectangle().fill(.white.opacity(0.10)).frame(height: 1)
+
+            HStack {
+                Spacer()
+                Button(action: onDone) {
+                    Text("Done").font(.system(size: 13, weight: .semibold)).foregroundStyle(.black)
+                        .padding(.horizontal, 20).padding(.vertical, 8)
+                        .background(.white, in: Capsule())
+                }.buttonStyle(.plain)
+            }
+            .padding(.horizontal, 18).padding(.vertical, 12)
+        }
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .background(Color(red: 0.11, green: 0.11, blue: 0.13).opacity(0.86), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(.white.opacity(0.15), lineWidth: 1))
+        .shadow(color: .black.opacity(0.44), radius: 30, y: 14)
+    }
+
+    private var divider: some View {
+        Rectangle().fill(.white.opacity(0.08)).frame(height: 1).padding(.horizontal, 18)
+    }
+
+    private func settingRow<T: View>(_ title: String, info: String? = nil, @ViewBuilder control: () -> T) -> some View {
+        HStack(spacing: 10) {
+            Text(title).font(.system(size: 13, weight: .medium)).foregroundStyle(ink)
+            if let info {
+                Image(systemName: "info.circle").font(.system(size: 11)).foregroundStyle(dim).help(info)
+            }
+            Spacer(minLength: 12)
+            control()
+        }
+        .padding(.horizontal, 18).padding(.vertical, 12)
+    }
+
+    private func menuLabel(_ title: String) -> some View {
+        HStack(spacing: 5) {
+            Text(title).font(.system(size: 12, weight: .medium))
+            Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .semibold))
+        }
+        .foregroundStyle(ink)
+        .padding(.horizontal, 11).padding(.vertical, 6)
+        .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
     }
 }
