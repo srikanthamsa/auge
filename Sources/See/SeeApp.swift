@@ -1833,6 +1833,36 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         webView.evaluateJavaScript("window.__seeSmartHover && window.__seeSmartHover(\(x), \(y)); window.__seeCursorAt && window.__seeCursorAt(\(x), \(y));", completionHandler: nil)
     }
 
+    /// Belt and braces for "the element did not come back": if the page still
+    /// reports it hidden after an unhide (some SPA stylesheets win), reload the
+    /// surface instead of making the user do it.
+    func verifyUnhidden(_ selector: String) {
+        guard let webView else { return }
+        let quoted = selector
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak webView] in
+            guard let webView else { return }
+            let js = """
+            (function(){
+              var sheet = document.getElementById('__see_hide');
+              if (sheet && sheet.textContent) { return 'managed'; }
+              var e = document.querySelector('\(quoted)');
+              if (!e) { return 'absent'; }
+              var s = getComputedStyle(e);
+              return s.display + '/' + s.visibility;
+            })();
+            """
+            webView.evaluateJavaScript(js) { value, _ in
+                guard let text = value as? String, text != "managed", text != "absent" else { return }
+                if text.hasPrefix("none") || text.contains("hidden") {
+                    debugLog("unhide left it \(text) -> reloading")
+                    webView.reload()
+                }
+            }
+        }
+    }
+
     func clearHover() {
         webView?.evaluateJavaScript("window.__seeSmartHoverClear && window.__seeSmartHoverClear();", completionHandler: nil)
     }
@@ -2733,7 +2763,7 @@ private struct WebsiteSurfaceView: View {
 /// and gradient tinted every widget; this reads the real background instead.
 private struct BehindWindowGlass: NSViewRepresentable {
     var material: NSVisualEffectView.Material = .underWindowBackground
-    var scrim: Double = 0.22
+    var scrim: Double = 0.12
 
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
@@ -3040,9 +3070,9 @@ private struct WorkspaceContextMenu: View {
                     Color.clear
                         .onAppear {
                             hover.setAction(key, action)
-                            DispatchQueue.main.async { hover.register(key, proxy.frame(in: .global)) }
+                            hover.register(key, proxy.frame(in: .global))
                         }
-                        .onChange(of: proxy.frame(in: .global)) { _, new in DispatchQueue.main.async { hover.register(key, new) } }
+                        .onChange(of: proxy.frame(in: .global)) { _, new in hover.register(key, new) }
                 })
         }
         .buttonStyle(.plain)
@@ -3074,13 +3104,20 @@ private final class MenuHover: ObservableObject {
     /// mouse-up, and the first click of a session can be lost to a re-render,
     /// which is why a menu row used to need a second click.
     func invoke(at point: CGPoint) -> Bool {
-        for (id, frame) in frames where frame.contains(point) {
-            guard let action = actions[id] else { continue }
-            row = nil
-            action()
-            return true
+        // Rows are 28pt tall; accept a click a couple of points outside one so a
+        // slightly high or low click still lands on the row the user aimed at.
+        var best: (id: String, distance: CGFloat)?
+        for (id, frame) in frames {
+            guard actions[id] != nil else { continue }
+            let slack = frame.insetBy(dx: -4, dy: -4)
+            guard slack.contains(point) else { continue }
+            let d = hypot(point.x - frame.midX, point.y - frame.midY)
+            if best == nil || d < best!.distance { best = (id, d) }
         }
-        return false
+        guard let hit = best, let action = actions[hit.id] else { return false }
+        row = nil
+        action()
+        return true
     }
 
     func clear(_ prefix: String) {
@@ -3371,9 +3408,9 @@ private struct SurfaceContextMenu: View {
                     Color.clear
                         .onAppear {
                             hover.setAction(key, action)
-                            DispatchQueue.main.async { hover.register(key, proxy.frame(in: .global)) }
+                            hover.register(key, proxy.frame(in: .global))
                         }
-                        .onChange(of: proxy.frame(in: .global)) { _, new in DispatchQueue.main.async { hover.register(key, new) } }
+                        .onChange(of: proxy.frame(in: .global)) { _, new in hover.register(key, new) }
                 })
         }
         .buttonStyle(.plain)
@@ -3493,9 +3530,7 @@ private struct ConfigureWidgetOverlay: View {
                                         debugLog("unhide \(selector)")
                                         site.applyTuning(reload: false)
                                         let quoted = "\(selector.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'"))"
-                                        site.webView?.evaluateJavaScript("var e=document.querySelectorAll('\(quoted)'); e.length + ' display=' + (e[0] ? getComputedStyle(e[0]).display : 'not-found') + ' sheet=' + ((document.getElementById('__see_hide')||{}).textContent||'').length") { value, _ in
-                                            debugLog("after unhide: \(String(describing: value))")
-                                        }
+                                        site.verifyUnhidden(selector)
                                     } label: {
                                         Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
                                             .foregroundStyle(.white.opacity(0.6))
@@ -3521,11 +3556,7 @@ private struct ConfigureWidgetOverlay: View {
                                     debugLog("unhide all")
                                     site.applyTuning(reload: false)
                                     if let first = previous.first {
-                                        let quoted = "\(first.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'"))"
-                                        let js = "var els=document.querySelectorAll('\(quoted)'); els.length + ' x display=' + (els[0] ? getComputedStyle(els[0]).display : 'none-found')" 
-                                        site.webView?.evaluateJavaScript(js) { value, _ in
-                                            debugLog("after clear all: \(String(describing: value))")
-                                        }
+                                        site.verifyUnhidden(first)
                                     }
                                 } label: {
                                     Text("Clear all").font(.system(size: 11, weight: .semibold))
