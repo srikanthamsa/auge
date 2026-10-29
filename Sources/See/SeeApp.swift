@@ -1763,15 +1763,14 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         })();
         """, completionHandler: nil)
         webView.needsDisplay = true
-        // While a panel is open the surface is a still image; hiding or restoring
-        // elements would otherwise stay invisible until the snapshot is retaken.
-        if chromeSnapshot != nil {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-                guard let self, self.chromeSnapshot != nil else { return }
-                self.chromeSnapshot = nil
-                self.enterChromeMode()
-                debugLog("chrome snapshot refreshed")
-            }
+        // Any hide or restore drops the still image and keeps the surface live.
+        // Re-taking a snapshot here was the bug: the web view is hidden at that
+        // point, so the new image was painted from the stale document and the
+        // change never showed.
+        if chromeSnapshot != nil || webView.isHidden {
+            chromeSnapshot = nil
+            webView.isHidden = false
+            debugLog("live edit: snapshot dropped")
         }
         installUserScripts(in: webView)
         refreshChromeSnapshot()
