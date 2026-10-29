@@ -1131,12 +1131,21 @@ private enum PageScripts {
         (function(){
           // One shared value: an observer created by an earlier call used to
           // re-assert the old selectors after "Clear all".
-          window.__seeHideCSS = \(encoded).map(function(s){ return s + '{display:none !important}' }).join(String.fromCharCode(10));
+          window.__seeHideCSS = \(encoded).map(function(s){
+            return s + '{display:none !important;visibility:hidden !important;pointer-events:none !important}';
+          }).join(String.fromCharCode(10));
           function ensure(){
             var style = document.getElementById('__see_hide');
+            if (!window.__seeHideCSS) {
+              // Nothing hidden: remove the sheet outright rather than leaving an
+              // empty one behind, which is what Peek does.
+              if (style) { style.remove(); }
+              return;
+            }
             if (!style) {
               style = document.createElement('style');
               style.id = '__see_hide';
+              style.setAttribute('data-see-managed', 'true');
               (document.head || document.documentElement).appendChild(style);
             }
             if (style.textContent !== window.__seeHideCSS) { style.textContent = window.__seeHideCSS; }
@@ -1742,6 +1751,18 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
                 debugLog("hide cleared, css length=\(String(describing: value))")
             }
         }
+        // Hiding or restoring an element changes the layout under a virtualised
+        // page (X, Google), which will not re-measure until something tells it
+        // to. Nudge it so removed rules show up without a reload.
+        webView.evaluateJavaScript("""
+        (function(){
+          window.dispatchEvent(new Event('resize'));
+          var nudge = function(){ if (document.body) { document.body.offsetHeight; } };
+          nudge();
+          requestAnimationFrame(function(){ nudge(); requestAnimationFrame(nudge); });
+        })();
+        """, completionHandler: nil)
+        webView.needsDisplay = true
         // While a panel is open the surface is a still image; hiding or restoring
         // elements would otherwise stay invisible until the snapshot is retaken.
         if chromeSnapshot != nil {
