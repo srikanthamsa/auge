@@ -148,10 +148,11 @@ private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
         guard down != fnHeld else { return }
         fnHeld = down
         if down {
-            guard panel?.isVisible != true else { return }
             openedByFn = true
-            debugLog("fn held -> peek")
-            showPanel()
+            if panel?.isVisible != true {
+                debugLog("fn held -> peek")
+                showPanel()
+            }
         } else if openedByFn {
             openedByFn = false
             debugLog("fn released -> hide")
@@ -2252,15 +2253,14 @@ private final class WebsiteHandleView: NSView {
         super.draw(dirtyRect)
 
         if isNearClose {
-            let rect = NSRect(x: bounds.maxX - 34, y: 10, width: 24, height: 24)
-            if let glyph = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Close")?
-                .withSymbolConfiguration(.init(pointSize: 22, weight: .regular)) {
-                NSColor.black.withAlphaComponent(0.55).setFill()
-                NSBezierPath(ovalIn: rect.insetBy(dx: -3, dy: -3)).fill()
-                glyph.isTemplate = true
-                NSColor.white.withAlphaComponent(0.9).set()
-                glyph.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
-            }
+            let circle = NSBezierPath(ovalIn: NSRect(x: bounds.maxX - 36, y: 8, width: 28, height: 28))
+            NSColor.black.withAlphaComponent(0.72).setFill()
+            circle.fill()
+            NSColor.white.withAlphaComponent(0.95).setStroke()
+            let x = NSBezierPath(); x.lineWidth = 1.8; x.lineCapStyle = .round
+            x.move(to: CGPoint(x: bounds.maxX - 28, y: 16)); x.line(to: CGPoint(x: bounds.maxX - 16, y: 28))
+            x.move(to: CGPoint(x: bounds.maxX - 16, y: 16)); x.line(to: CGPoint(x: bounds.maxX - 28, y: 28))
+            x.stroke()
         }
 
         guard isNearControl else { return }
@@ -2886,8 +2886,8 @@ private struct WebsiteSurfaceView: View {
 /// and gradient tinted every widget; this reads the real background instead.
 private struct BehindWindowGlass: NSViewRepresentable {
     var material: NSVisualEffectView.Material = .underWindowBackground
-    /// No tint of See's own: the widget shows exactly what is behind it.
-    var scrim: Double = 0.0
+    /// Light scrim: the glass stays readable without going flat.
+    var scrim: Double = 0.04
 
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
@@ -2895,9 +2895,6 @@ private struct BehindWindowGlass: NSViewRepresentable {
         view.blendingMode = .behindWindow
         view.state = .active
         view.isEmphasized = false
-        // The material itself carries a tint; easing its alpha lets more of the
-        // untouched background through.
-        view.alphaValue = 0.62
         let dark = NSView()
         dark.wantsLayer = true
         dark.layer?.backgroundColor = NSColor.black.withAlphaComponent(scrim).cgColor
