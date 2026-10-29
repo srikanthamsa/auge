@@ -1,4 +1,5 @@
 import AppKit
+import IOKit.ps
 import QuartzCore
 import AVFoundation
 import CoreMedia
@@ -715,9 +716,42 @@ private final class OverlayModel: ObservableObject {
 
 private enum NativeWidgetKind: String, CaseIterable, Identifiable {
     case clock = "Clock", calendar = "Calendar", note = "Quick Note"
+    case timer = "Timer", battery = "Battery", system = "System"
+
     var id: String { rawValue }
-    var symbol: String { switch self { case .clock: "clock"; case .calendar: "calendar"; case .note: "note.text" } }
-    var size: CGSize { switch self { case .clock: CGSize(width: 300, height: 220); case .calendar: CGSize(width: 340, height: 340); case .note: CGSize(width: 340, height: 280) } }
+
+    var symbol: String {
+        switch self {
+        case .clock: "clock"
+        case .calendar: "calendar"
+        case .note: "note.text"
+        case .timer: "timer"
+        case .battery: "battery.75percent"
+        case .system: "cpu"
+        }
+    }
+
+    var size: CGSize {
+        switch self {
+        case .clock: CGSize(width: 300, height: 220)
+        case .calendar: CGSize(width: 340, height: 340)
+        case .note: CGSize(width: 340, height: 280)
+        case .timer: CGSize(width: 300, height: 220)
+        case .battery: CGSize(width: 300, height: 200)
+        case .system: CGSize(width: 340, height: 260)
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .clock: "Time and date"
+        case .calendar: "This month"
+        case .note: "A scratchpad"
+        case .timer: "Countdown"
+        case .battery: "Charge and power"
+        case .system: "CPU and memory"
+        }
+    }
 }
 
 private enum WidgetPickerCategory: String, CaseIterable, Identifiable {
@@ -820,6 +854,22 @@ private struct WebsiteConfig: Codable, Equatable {
     var userAgent: WebsiteUserAgent = .chromeMac
     var hiddenSelectors: [String] = []
     var darkMode = false
+    /// CSS the user writes for this surface; injected on every load.
+    var customCode: String = ""
+
+    init() {}
+
+    /// Tolerant decoding: new fields must never make an older workspace file
+    /// unreadable, which would silently start the user with an empty workspace.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        autoRefresh = try c.decodeIfPresent(Double.self, forKey: .autoRefresh) ?? 0
+        rememberScroll = try c.decodeIfPresent(Bool.self, forKey: .rememberScroll) ?? true
+        userAgent = try c.decodeIfPresent(WebsiteUserAgent.self, forKey: .userAgent) ?? .chromeMac
+        hiddenSelectors = try c.decodeIfPresent([String].self, forKey: .hiddenSelectors) ?? []
+        darkMode = try c.decodeIfPresent(Bool.self, forKey: .darkMode) ?? false
+        customCode = try c.decodeIfPresent(String.self, forKey: .customCode) ?? ""
+    }
 }
 
 private enum AutoRefreshOption: Double, CaseIterable, Identifiable {
@@ -1482,6 +1532,23 @@ private enum PageScripts {
     })();
     """
 
+    static func customCSS(_ css: String) -> String {
+        let payload = (try? JSONEncoder().encode(css)).flatMap { String(data: $0, encoding: .utf8) } ?? "\"\""
+        return """
+        (function(){
+          var css = \(payload);
+          var style = document.getElementById('__see_custom');
+          if (!css.trim().length) { if (style) { style.remove(); } return; }
+          if (!style) {
+            style = document.createElement('style');
+            style.id = '__see_custom';
+            (document.head || document.documentElement).appendChild(style);
+          }
+          if (style.textContent !== css) { style.textContent = css; }
+        })();
+        """
+    }
+
     /// A dark canvas from the first byte of a new document, removed once the
     /// page has painted. Without it every back/forward shows WebKit's white
     /// default before the page's own background arrives.
@@ -1700,6 +1767,7 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         webView.customUserAgent = config.userAgent.string
         webView.appearance = config.darkMode ? NSAppearance(named: .darkAqua) : nil
         installUserScripts(in: webView)
+        webView.evaluateJavaScript(PageScripts.customCSS(config.customCode), completionHandler: nil)
         scheduleAutoRefresh()
         applyHiddenSelectors()
         if reload {
@@ -1723,6 +1791,10 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
                                                   injectionTime: .atDocumentStart, forMainFrameOnly: false))
             controller.addUserScript(WKUserScript(source: PageScripts.darkMode,
                                                   injectionTime: .atDocumentEnd, forMainFrameOnly: false))
+        }
+        if !config.customCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            controller.addUserScript(WKUserScript(source: PageScripts.customCSS(config.customCode),
+                                                  injectionTime: .atDocumentEnd, forMainFrameOnly: true))
         }
         controller.addUserScript(WKUserScript(source: PageScripts.flashGuard,
                                               injectionTime: .atDocumentStart, forMainFrameOnly: false))
@@ -2762,7 +2834,7 @@ private struct WebsiteSurfaceView: View {
 /// and gradient tinted every widget; this reads the real background instead.
 private struct BehindWindowGlass: NSViewRepresentable {
     var material: NSVisualEffectView.Material = .underWindowBackground
-    var scrim: Double = 0.12
+    var scrim: Double = 0.04
 
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
@@ -2995,7 +3067,7 @@ private struct NativeWidgetView: View {
                     Text(ctx.date, format: .dateTime.weekday(.wide).month(.wide).day())
                         .font(.system(size: 13, weight: .medium)).foregroundStyle(ink.opacity(0.62))
                     Text(ctx.date, format: .dateTime.hour().minute())
-                        .font(.system(size: 56, weight: .light, design: .rounded)).monospacedDigit().foregroundStyle(ink)
+                        .font(.system(size: 58, weight: .heavy, design: .rounded)).monospacedDigit().foregroundStyle(ink)
                     Text("LOCAL TIME").font(.system(size: 10, weight: .bold)).tracking(2).foregroundStyle(ink.opacity(0.42))
                 }
                 .multilineTextAlignment(.center)
@@ -3023,7 +3095,275 @@ private struct NativeWidgetView: View {
                 Label("Quick Note", systemImage: "note.text").font(.system(size: 14, weight: .semibold)).foregroundStyle(ink.opacity(0.82))
                 TextEditor(text: $widget.note).scrollContentBackground(.hidden).font(.system(size: 15)).foregroundStyle(ink).background(.clear)
             }
+        case .timer:
+            TimerView(widget: widget, ink: ink)
+        case .battery:
+            BatteryView(ink: ink)
+        case .system:
+            SystemStatsView(ink: ink)
         }
+    }
+}
+
+// MARK: - Extra widget faces
+
+/// Countdown that belongs to one widget. The remaining seconds live in a small
+/// store so the timer keeps running while the peek is closed.
+@MainActor
+private final class TimerStore: ObservableObject {
+    static let shared = TimerStore()
+    struct Entry { var remaining: Double; var running: Bool; var last: Date }
+    private var entries: [UUID: Entry] = [:]
+    private var ticker: Timer?
+
+    func entry(for id: UUID, minutes: Double = 5) -> Entry {
+        if let e = entries[id] { return e }
+        let e = Entry(remaining: minutes * 60, running: false, last: Date())
+        entries[id] = e
+        return e
+    }
+
+    func toggle(_ id: UUID, minutes: Double) {
+        var e = entry(for: id, minutes: minutes)
+        if e.running {
+            e.remaining = max(0, e.remaining - Date().timeIntervalSince(e.last))
+            e.running = false
+        } else {
+            e.running = e.remaining > 0
+            e.last = Date()
+        }
+        entries[id] = e
+        objectWillChange.send()
+        startTickerIfNeeded()
+    }
+
+    func reset(_ id: UUID, minutes: Double) {
+        entries[id] = Entry(remaining: minutes * 60, running: false, last: Date())
+        objectWillChange.send()
+    }
+
+    private func startTickerIfNeeded() {
+        guard ticker == nil else { return }
+        ticker = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.tick() }
+        }
+    }
+
+    private func tick() {
+        var anyRunning = false
+        for (id, var e) in entries where e.running {
+            let now = Date()
+            e.remaining = max(0, e.remaining - now.timeIntervalSince(e.last))
+            e.last = now
+            if e.remaining <= 0 { e.running = false }
+            entries[id] = e
+            anyRunning = anyRunning || e.running
+        }
+        objectWillChange.send()
+        if !anyRunning { ticker?.invalidate(); ticker = nil }
+    }
+}
+
+@MainActor
+private struct TimerView: View {
+    @ObservedObject var widget: NativeWidgetSurface
+    let ink: Color
+    @StateObject private var store = TimerStore.shared
+
+    private var minutes: Double { Double(widget.note.trimmingCharacters(in: .whitespaces)) ?? 5 }
+
+    var body: some View {
+        let entry = store.entry(for: widget.id, minutes: minutes)
+        let total = Int(entry.remaining.rounded())
+        VStack(spacing: 12) {
+            Text(String(format: "%02d:%02d", total / 60, total % 60))
+                .font(.system(size: 54, weight: .heavy, design: .rounded))
+                .monospacedDigit().foregroundStyle(ink)
+            HStack(spacing: 10) {
+                Button { store.toggle(widget.id, minutes: minutes) } label: {
+                    Image(systemName: entry.running ? "pause.fill" : "play.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .frame(width: 38, height: 30)
+                        .background(.white.opacity(0.16), in: Capsule())
+                }.buttonStyle(.plain)
+                Button { store.reset(widget.id, minutes: minutes) } label: {
+                    Image(systemName: "arrow.counterclockwise")
+                        .font(.system(size: 12, weight: .bold))
+                        .frame(width: 38, height: 30)
+                        .background(.white.opacity(0.10), in: Capsule())
+                }.buttonStyle(.plain)
+                Menu {
+                    ForEach([1, 3, 5, 10, 15, 25, 45, 60], id: \.self) { value in
+                        Button("\(value) minutes") {
+                            widget.note = "\(value)"
+                            store.reset(widget.id, minutes: Double(value))
+                        }
+                    }
+                } label: {
+                    Text("\(Int(minutes)) min").font(.system(size: 12, weight: .semibold))
+                        .padding(.horizontal, 11).frame(height: 30)
+                        .background(.white.opacity(0.10), in: Capsule())
+                }.menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
+            }
+            .foregroundStyle(ink.opacity(0.9))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+@MainActor
+private struct BatteryView: View {
+    let ink: Color
+    @StateObject private var power = PowerSource()
+
+    var body: some View {
+        VStack(spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text("\(power.percent)").font(.system(size: 56, weight: .heavy, design: .rounded))
+                    .monospacedDigit().foregroundStyle(ink)
+                Text("%").font(.system(size: 20, weight: .semibold)).foregroundStyle(ink.opacity(0.6))
+            }
+            Text(power.state).font(.system(size: 11, weight: .semibold)).tracking(1.2)
+                .foregroundStyle(ink.opacity(0.55))
+            Capsule().fill(.white.opacity(0.16)).frame(height: 8)
+                .overlay(alignment: .leading) {
+                    GeometryReader { geo in
+                        Capsule().fill(power.onPower ? Color.green.opacity(0.85) : ink.opacity(0.8))
+                            .frame(width: max(6, geo.size.width * CGFloat(power.percent) / 100))
+                    }
+                }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// Battery percentage straight from IOKit, refreshed every 20 seconds.
+@MainActor
+private final class PowerSource: ObservableObject {
+    @Published var percent = 100
+    @Published var onPower = false
+    private var timer: Timer?
+
+    init() {
+        refresh()
+        timer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refresh() }
+        }
+    }
+
+    var state: String {
+        if onPower { return percent >= 100 ? "CHARGED" : "CHARGING" }
+        return percent <= 20 ? "LOW BATTERY" : "ON BATTERY"
+    }
+
+    private func refresh() {
+        guard let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let sources = IOPSCopyPowerSourcesList(snapshot)?.takeRetainedValue() as? [CFTypeRef] else { return }
+        for source in sources {
+            guard let info = IOPSGetPowerSourceDescription(snapshot, source)?.takeUnretainedValue() as? [String: Any] else { continue }
+            if let capacity = info[kIOPSCurrentCapacityKey as String] as? Int,
+               let max = info[kIOPSMaxCapacityKey as String] as? Int, max > 0 {
+                percent = Int((Double(capacity) / Double(max) * 100).rounded())
+            }
+            if let charging = info[kIOPSPowerSourceStateKey as String] as? String {
+                onPower = charging == (kIOPSACPowerValue as String)
+            }
+        }
+    }
+}
+
+@MainActor
+private struct SystemStatsView: View {
+    let ink: Color
+    @StateObject private var stats = SystemSampler()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            row("CPU", value: stats.cpu, detail: "\(Int(stats.cpu * 100))%")
+            row("Memory", value: stats.memory, detail: "\(Int(stats.memory * 100))%")
+            row("Disk", value: stats.disk, detail: "\(Int(stats.disk * 100))%")
+            Spacer(minLength: 0)
+            Text(stats.uptime).font(.system(size: 10.5, weight: .medium)).foregroundStyle(ink.opacity(0.45))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func row(_ title: String, value: Double, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(title).font(.system(size: 12, weight: .semibold)).foregroundStyle(ink.opacity(0.75))
+                Spacer()
+                Text(detail).font(.system(size: 12, weight: .semibold)).monospacedDigit().foregroundStyle(ink.opacity(0.85))
+            }
+            Capsule().fill(.white.opacity(0.14)).frame(height: 6)
+                .overlay(alignment: .leading) {
+                    GeometryReader { geo in
+                        Capsule().fill(ink.opacity(0.85))
+                            .frame(width: max(4, geo.size.width * CGFloat(min(1, value))))
+                    }
+                }
+        }
+    }
+}
+
+@MainActor
+private final class SystemSampler: ObservableObject {
+    @Published var cpu: Double = 0
+    @Published var memory: Double = 0
+    @Published var disk: Double = 0
+    @Published var uptime: String = ""
+
+    private var timer: Timer?
+    private var previousTicks: (user: Double, system: Double, idle: Double) = (0, 0, 0)
+
+    init() {
+        sample()
+        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.sample() }
+        }
+    }
+
+    private func sample() {
+        var load = host_cpu_load_info()
+        var count = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &load) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, $0, &count)
+            }
+        }
+        if result == KERN_SUCCESS {
+            let user = Double(load.cpu_ticks.0), system = Double(load.cpu_ticks.1), idle = Double(load.cpu_ticks.2)
+            let total = (user - previousTicks.user) + (system - previousTicks.system) + (idle - previousTicks.idle)
+            if total > 0 {
+                cpu = ((user - previousTicks.user) + (system - previousTicks.system)) / total
+            }
+            previousTicks = (user, system, idle)
+        }
+
+        var vm = vm_statistics64()
+        var vmCount = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size)
+        let vmResult = withUnsafeMutablePointer(to: &vm) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(vmCount)) {
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &vmCount)
+            }
+        }
+        if vmResult == KERN_SUCCESS {
+            let page = Double(sysconf(_SC_PAGESIZE))
+            let used = (Double(vm.active_count) + Double(vm.wire_count) + Double(vm.compressor_page_count)) * page
+            let totalMemory = Double(ProcessInfo.processInfo.physicalMemory)
+            memory = min(1, used / totalMemory)
+        }
+
+        if let attrs = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory()),
+           let free = attrs[.systemFreeSize] as? NSNumber, let size = attrs[.systemSize] as? NSNumber, size.doubleValue > 0 {
+            disk = 1 - free.doubleValue / size.doubleValue
+        }
+
+        let seconds = ProcessInfo.processInfo.systemUptime
+        let days = Int(seconds) / 86400
+        let hours = (Int(seconds) % 86400) / 3600
+        let minutes = (Int(seconds) % 3600) / 60
+        uptime = days > 0 ? "Up \(days)d \(hours)h" : "Up \(hours)h \(minutes)m"
     }
 }
 
@@ -3258,7 +3598,7 @@ private struct WidgetPickerOverlay: View {
                             .frame(width: 42, height: 42).background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 11))
                         VStack(alignment: .leading, spacing: 3) {
                             Text(kind.rawValue).font(.system(size: 13, weight: .semibold))
-                            Text("Add to your workspace").font(.system(size: 11)).foregroundStyle(.white.opacity(0.48))
+                            Text(kind.summary).font(.system(size: 11)).foregroundStyle(.white.opacity(0.48))
                         }
                         Spacer(minLength: 0)
                     }
@@ -3416,6 +3756,21 @@ private struct SurfaceContextMenu: View {
     }
 }
 
+/// Runs a closure shortly after the last call, for live-editing a text field.
+@MainActor
+private final class DebouncedApply: ObservableObject {
+    private var work: Task<Void, Never>?
+
+    func apply(_ action: @escaping () -> Void) {
+        work?.cancel()
+        work = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            guard !Task.isCancelled else { return }
+            action()
+        }
+    }
+}
+
 // MARK: - Configure widget
 
 @MainActor
@@ -3439,6 +3794,13 @@ private struct ConfigureWidgetOverlay: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .preferredColorScheme(.dark)
+    }
+
+    @StateObject private var customWork = DebouncedApply()
+
+    private func applyCustomCode(_ site: WebsiteSurface) {
+        // Debounced: typing in the editor must not re-inject on every keystroke.
+        customWork.apply { site.applyTuning(reload: false) }
     }
 
     private var panel: some View {
@@ -3581,6 +3943,43 @@ private struct ConfigureWidgetOverlay: View {
                             .toggleStyle(.switch).labelsHidden().controlSize(.small)
                         }
                     }
+
+                    divider
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Custom code").font(.system(size: 13, weight: .medium)).foregroundStyle(ink)
+                            Spacer()
+                            if !site.config.customCode.isEmpty {
+                                Button {
+                                    site.config.customCode = ""
+                                    site.applyTuning(reload: false)
+                                } label: {
+                                    Text("Clear").font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(dim)
+                                        .padding(.horizontal, 8).padding(.vertical, 5)
+                                        .contentShape(Rectangle())
+                                }.buttonStyle(.plain)
+                            }
+                        }
+                        TextEditor(text: Binding(
+                            get: { site.config.customCode },
+                            set: { site.config.customCode = $0 }
+                        ))
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .foregroundStyle(ink.opacity(0.9))
+                        .scrollContentBackground(.hidden)
+                        .frame(height: 92)
+                        .padding(8)
+                        .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 9))
+                        .overlay(RoundedRectangle(cornerRadius: 9).stroke(.white.opacity(0.08), lineWidth: 1))
+                        .onChange(of: site.config.customCode) { _, _ in
+                            applyCustomCode(site)
+                        }
+                        Text("CSS applied to this page on every load, e.g. .header { display: none }")
+                            .font(.system(size: 10.5)).foregroundStyle(dim)
+                    }
+                    .padding(.horizontal, 18).padding(.vertical, 13)
             }
 
 
