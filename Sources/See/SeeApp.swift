@@ -98,6 +98,7 @@ private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
     private func hidePanel() {
         guard let panel, panel.isVisible else { return }
         for site in model.websites { site.setPicking(false) }
+        PointerPump.site?.clearHover()
         NotificationCenter.default.post(name: .seePeekClosed, object: nil)
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.09
@@ -168,7 +169,7 @@ private final class FirstMouseHostingView<Content: View>: NSHostingView<Content>
 @MainActor
 private struct WorkspaceInteractionMonitor: NSViewRepresentable {
     let onRightClick: (CGPoint) -> Void
-    let onDismiss: () -> Void
+    let onDismiss: (CGPoint) -> Void
     let isSurfaceAt: (CGPoint) -> Bool
     let contextMenuFrame: () -> CGRect?
     let onDragCreating: (CGRect) -> Void   // live rect while drawing
@@ -193,7 +194,7 @@ private struct WorkspaceInteractionMonitor: NSViewRepresentable {
 @MainActor
 final class WorkspaceInteractionView: NSView {
     var onRightClick: ((CGPoint) -> Void)?
-    var onDismiss: (() -> Void)?
+    var onDismiss: ((CGPoint) -> Void)?
     var isSurfaceAt: ((CGPoint) -> Bool)?
     var contextMenuFrame: (() -> CGRect?)?
     var onDragCreating: ((CGRect) -> Void)?
@@ -223,8 +224,8 @@ final class WorkspaceInteractionView: NSView {
                 self.onRightClick?(point); return nil
             case .leftMouseDown:
                 debugLog("left down at \(point) key=\(self.window?.isKeyWindow == true) active=\(NSApp.isActive)")
-                if let menuFrame = self.contextMenuFrame?(), !menuFrame.contains(point) { self.onDismiss?() }
-                else if self.contextMenuFrame?() == nil { self.onDismiss?() }
+                if let menuFrame = self.contextMenuFrame?(), !menuFrame.contains(point) { self.onDismiss?(point) }
+                else if self.contextMenuFrame?() == nil { self.onDismiss?(point) }
                 // Only start drag-to-create on empty workspace
                 if self.isSurfaceAt?(point) == false { self.dragStart = point }
                 return event
@@ -1320,7 +1321,15 @@ private enum PageScripts {
       // `:hover` styles (button highlights, tooltips) stay dark. Rebuild the
       // page's own hover rules against a class we control and move that class
       // to whatever is under the pointer.
-      var hoverEls = [];
+      var hoverChain = [];
+      var hoverLast = null;
+      function fire(el, type, x, y){
+        if (!el || !el.dispatchEvent) { return; }
+        var bubbles = (type !== 'mouseenter' && type !== 'mouseleave');
+        try {
+          el.dispatchEvent(new MouseEvent(type, { bubbles: bubbles, cancelable: true, view: window, clientX: x, clientY: y }));
+        } catch (err) {}
+      }
       function buildHoverCSS(){
         var out = [];
         var sheets = document.styleSheets;
@@ -1359,32 +1368,68 @@ private enum PageScripts {
         }
       }
       var hoverBuilt = 0;
+      function releaseHover(x, y){
+        for (var i = hoverChain.length - 1; i >= 0; i--) {
+          var node = hoverChain[i];
+          fire(node, 'mouseout', x, y);
+          fire(node, 'mouseleave', x, y);
+          node.classList.remove('__see-hover');
+        }
+        hoverChain = [];
+        hoverLast = null;
+      }
       window.__seeSmartHover = function(x, y){
         var now = Date.now();
         if (now - hoverBuilt > 2500) { hoverBuilt = now; try { buildHoverCSS(); } catch (err) {} }
         var el = document.elementFromPoint(x, y);
-        if (hoverEls.length && hoverEls[0] === el) { return; }
-        for (var k = 0; k < hoverEls.length; k++) { hoverEls[k].classList.remove('__see-hover'); }
-        hoverEls = [];
-        if (!el || el === document.documentElement) { return; }
-        var node = el, depth = 0;
+        if (el === hoverLast) { return; }
+        releaseHover(x, y);
+        if (!el || el === document.documentElement || el === document.body) { return; }
+        hoverLast = el;
+        var chain = [], node = el, depth = 0;
         while (node && node !== document.documentElement && depth < 8) {
-          node.classList.add('__see-hover');
-          hoverEls.push(node);
-          node = node.parentElement; depth++;
+          chain.push(node); node = node.parentElement; depth++;
         }
-        var current = el;
-        try { buildHoverCSS(); } catch (err) {}
-        if (current && current.dispatchEvent) {
-          var opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y };
-          current.dispatchEvent(new MouseEvent('mouseover', opts));
-          current.dispatchEvent(new MouseEvent('mousemove', opts));
+        // Enter from the outside in, the way a real pointer would.
+        for (var j = chain.length - 1; j >= 0; j--) {
+          fire(chain[j], 'mouseover', x, y);
+          fire(chain[j], 'mouseenter', x, y);
+          chain[j].classList.add('__see-hover');
         }
+        fire(el, 'mousemove', x, y);
+        hoverChain = chain;
       };
       window.__seeSmartHoverClear = function(){
-        for (var k = 0; k < hoverEls.length; k++) { hoverEls[k].classList.remove('__see-hover'); }
-        hoverEls = [];
+        releaseHover(0, 0);
       };
+    })();
+    """
+
+    /// A dark canvas from the first byte of a new document, removed once the
+    /// page has painted. Without it every back/forward shows WebKit's white
+    /// default before the page's own background arrives.
+    static let flashGuard = """
+    (function(){
+      if (window.__seeFlashGuard) { return; }
+      window.__seeFlashGuard = true;
+      var install = function(){
+        if (!document.documentElement) { return; }
+        // Reuse one element: readystatechange fires more than once and a second
+        // element would survive the cleanup below.
+        var style = document.getElementById('__see_flash');
+        if (!style) {
+          style = document.createElement('style');
+          style.id = '__see_flash';
+          document.documentElement.appendChild(style);
+        }
+        style.textContent = 'html,body{background-color:#0f1013 !important}';
+      };
+      install();
+      document.addEventListener('readystatechange', install, true);
+      setTimeout(function(){
+        var all = document.querySelectorAll('#__see_flash');
+        for (var i = 0; i < all.length; i++) { all[i].remove(); }
+      }, 2500);
     })();
     """
 
@@ -1599,6 +1644,8 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
             controller.addUserScript(WKUserScript(source: PageScripts.darkMode,
                                                   injectionTime: .atDocumentEnd, forMainFrameOnly: false))
         }
+        controller.addUserScript(WKUserScript(source: PageScripts.flashGuard,
+                                              injectionTime: .atDocumentStart, forMainFrameOnly: false))
         controller.addUserScript(WKUserScript(source: PageScripts.scrollReporter,
                                               injectionTime: .atDocumentEnd, forMainFrameOnly: false))
         controller.addUserScript(WKUserScript(source: PageScripts.cursorProbe,
@@ -1632,6 +1679,7 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
             return
         }
         isPickingElements = picking
+        webHost?.refreshHandles()
         debugLog("setPicking \(picking) hidden=\(String(describing: webView?.isHidden))")
         guard let webView else { return }
         installUserScripts(in: webView)
@@ -1705,6 +1753,8 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     }
 
     func didFinishLoad(in webView: WKWebView) {
+        // The page paints its own background now; drop the dark canvas.
+        webView.evaluateJavaScript("(function(){ var all = document.querySelectorAll('#__see_flash'); for (var i = 0; i < all.length; i++) { all[i].remove(); } return all.length; })()", completionHandler: nil)
         webView.customUserAgent = config.userAgent.string
         webView.appearance = config.darkMode ? NSAppearance(named: .darkAqua) : nil
         if config.rememberScroll, scrollY > 0 {
@@ -1745,10 +1795,13 @@ private struct WebsiteView: NSViewRepresentable {
         host.onClose = onClose
         host.onPick = onPick
         host.webView.allowsBackForwardNavigationGestures = true
-        host.webView.setValue(false, forKey: "drawsBackground")
-        // WebKit paints the untouched backing store white while a history
-        // navigation swaps documents; match the surface colour instead.
+        // An opaque backing store plus a dark under-page colour is what stops
+        // the white flash while back/forward swaps documents: WebKit paints the
+        // under-page colour, never its default white.
+        host.webView.setValue(true, forKey: "drawsBackground")
         host.webView.underPageBackgroundColor = NSColor(calibratedRed: 0.086, green: 0.090, blue: 0.098, alpha: 1)
+        host.wantsLayer = true
+        host.layer?.backgroundColor = NSColor(calibratedRed: 0.086, green: 0.090, blue: 0.098, alpha: 1).cgColor
         host.webView.customUserAgent = site.config.userAgent.string
         host.webView.appearance = site.config.darkMode ? NSAppearance(named: .darkAqua) : nil
         site.webView = host.webView
@@ -1868,6 +1921,7 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate {
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         let local = convert(point, from: superview)
+        if site.isPickingElements, doneRect.contains(local) { return self }
         if moveRect.contains(local) || resizeRect.contains(local) || closeRect.contains(local) { return self }
         return super.hitTest(point)
     }
@@ -1896,6 +1950,12 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate {
 
     override func mouseDown(with event: NSEvent) {
         let pt = convert(event.locationInWindow, from: nil)
+        if site.isPickingElements, doneRect.contains(pt) {
+            debugLog("zapping done pressed")
+            site.setPicking(false)
+            handles.needsDisplay = true
+            return
+        }
         if closeRect.contains(pt) { activeClose = true; return }
         activeHandle = moveRect.contains(pt) ? .move : (resizeRect.contains(pt) ? .resize : nil)
         debugLog("site mouseDown pt=\(pt) moveRect=\(moveRect) resizeRect=\(resizeRect) handle=\(String(describing: activeHandle)) bounds=\(bounds)")
@@ -1922,6 +1982,15 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate {
     private var activeClose = false
 
     // Proximity zones: draw targets are small; grab zone is generous
+    /// Same pill the handle view draws while zapping; the host owns its hit area
+    /// because the web view sits above the handle view for page clicks.
+    private var doneRect: CGRect {
+        let width = min(260, max(180, bounds.width - 40))
+        return CGRect(x: bounds.midX - width / 2, y: 12, width: width, height: 34)
+    }
+
+    func refreshHandles() { handles.needsDisplay = true }
+
     private var moveRect: CGRect { CGRect(x: bounds.midX - 90, y: bounds.height - 72, width: 180, height: 72) }
     private var resizeRect: CGRect { CGRect(x: bounds.width - 58, y: bounds.height - 58, width: 58, height: 58) }
     private var closeRect: CGRect { CGRect(x: bounds.width - 58, y: 0, width: 58, height: 58) }
@@ -1942,8 +2011,46 @@ private final class WebsiteHandleView: NSView {
     required init?(coder: NSCoder) { fatalError() }
     override var isFlipped: Bool { true }
 
+    /// Real AppKit hit area for the zapping pill: a SwiftUI overlay would be
+    /// drawn above the page but the web view still takes the click.
+    var doneRect: CGRect {
+        let width = min(260, max(180, bounds.width - 40))
+        return CGRect(x: bounds.midX - width / 2, y: 12, width: width, height: 34)
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+
+        if site.isPickingElements {
+            let rect = doneRect
+            let pill = NSBezierPath(roundedRect: rect, xRadius: rect.height / 2, yRadius: rect.height / 2)
+            NSColor(calibratedWhite: 0.12, alpha: 0.92).setFill()
+            pill.fill()
+            NSColor.white.withAlphaComponent(0.15).setStroke()
+            pill.lineWidth = 1
+            pill.stroke()
+
+            let dot = NSBezierPath(ovalIn: NSRect(x: rect.minX + 12, y: rect.midY - 4, width: 8, height: 8))
+            NSColor.systemRed.withAlphaComponent(0.95).setFill()
+            dot.fill()
+
+            let doneBox = NSRect(x: rect.maxX - 64, y: rect.minY + 6,
+                                 width: 56, height: rect.height - 12)
+            let done = NSBezierPath(roundedRect: doneBox, xRadius: doneBox.height / 2, yRadius: doneBox.height / 2)
+            NSColor.white.withAlphaComponent(0.18).setFill()
+            done.fill()
+
+            let font = NSFont.systemFont(ofSize: 11.5, weight: .medium)
+            ("Zapping — click to hide" as NSString).draw(
+                at: CGPoint(x: rect.minX + 26, y: rect.minY + (rect.height - 15) / 2),
+                withAttributes: [.font: font,
+                                 .foregroundColor: NSColor.white.withAlphaComponent(0.88)])
+            let doneFont = NSFont.systemFont(ofSize: 11.5, weight: .semibold)
+            let doneText = "Done" as NSString
+            let size = doneText.size(withAttributes: [.font: doneFont])
+            doneText.draw(at: CGPoint(x: doneBox.midX - size.width / 2, y: doneBox.midY - size.height / 2),
+                          withAttributes: [.font: doneFont, .foregroundColor: NSColor.white])
+        }
 
         if isNearClose {
             let circle = NSBezierPath(ovalIn: NSRect(x: bounds.maxX - 36, y: 8, width: 28, height: 28))
@@ -2170,9 +2277,17 @@ private struct SeeOverlay: View {
                             }
                         }
                     },
-                    onDismiss: {
+                    onDismiss: { point in
                         withAnimation(.easeOut(duration: 0.16)) {
                             model.contextMenuPoint = nil; model.surfaceMenu = nil
+                        }
+                        // Clicking away from a zapping surface ends the session:
+                        // picking had no other way out than Escape.
+                        for site in model.websites where site.isPickingElements {
+                            let rect = CGRect(x: site.center.x - site.size.width / 2,
+                                              y: site.center.y - site.size.height / 2,
+                                              width: site.size.width, height: site.size.height)
+                            if !rect.contains(point) { site.setPicking(false) }
                         }
                     },
                     isSurfaceAt: { pt in isPointOverSurface(pt, size: size) },
@@ -2236,6 +2351,7 @@ private struct SeeOverlay: View {
         // Feed the pointer to the page under it, so `:hover` styles and
         // tooltips inside a website behave as they do in a browser.
         if let site = model.website(at: p) {
+            if let previous = PointerPump.site, previous !== site { previous.clearHover() }
             PointerPump.site = site
         } else if let previous = PointerPump.site {
             PointerPump.site = nil
