@@ -799,125 +799,125 @@ private final class OverlayModel: ObservableObject {
             let index: Int
             let locked: Bool
             let minSize: CGSize
-            var size: CGSize
+            let natural: CGSize
         }
+        struct Placement { let index: Int; let frame: CGRect }
 
+        let gap: CGFloat = 18
         let siteMin = CGSize(width: 360, height: 300)
         var items: [Item] = websites.enumerated().map {
             Item(isWidget: false, index: $0.offset, locked: $0.element.sizeLocked,
-                 minSize: siteMin, size: $0.element.size)
+                 minSize: siteMin, natural: $0.element.size)
         }
         items += widgets.enumerated().map {
             Item(isWidget: true, index: $0.offset, locked: $0.element.sizeLocked,
-                 minSize: $0.element.kind.minSize, size: $0.element.size)
+                 minSize: $0.element.kind.minSize, natural: $0.element.size)
         }
         guard !items.isEmpty else { return }
 
-        let gap: CGFloat = 18
         let usable = CGRect(x: 34, y: 92,
                             width: max(240, size.width - 68),
                             height: max(240, size.height - 168))
 
-        // Nothing may be smaller than it can render: clamp every surface to its
-        // own minimum before anything else happens.
-        for i in items.indices {
-            items[i].size = CGSize(width: max(items[i].minSize.width, items[i].size.width),
-                                   height: max(items[i].minSize.height, items[i].size.height))
-        }
-
-        // Scale the flexible surfaces down until the whole set fits. Locked
-        // surfaces never shrink, so they may make the set impossible; the scale
-        // stops at 1 minimum so the message below is about space, not maths.
-        func totalHeight(_ scale: CGFloat) -> CGFloat {
-            var x: CGFloat = 0, y: CGFloat = 0, rowHeight: CGFloat = 0
-            for item in items {
-                let w = item.locked ? item.size.width : max(item.minSize.width, item.size.width * scale)
-                let h = item.locked ? item.size.height : max(item.minSize.height, item.size.height * scale)
-                if x > 0 && x + w > usable.width { x = 0; y += rowHeight + gap; rowHeight = 0 }
-                x += w + gap
-                rowHeight = max(rowHeight, h)
+        func sizeOf(_ item: Item, _ scale: CGFloat) -> CGSize {
+            if item.locked {
+                return CGSize(width: min(item.natural.width, usable.width),
+                              height: min(item.natural.height, usable.height))
             }
-            return y + rowHeight
+            return CGSize(width: max(item.minSize.width, item.natural.width * scale),
+                          height: max(item.minSize.height, item.natural.height * scale))
         }
 
-        // Locked sizes may make the set impossible. Rather than overlap or
-        // shrink below what a widget can render, leave the layout alone and say
-        // why — the user's arrangement is still there.
-        func widestRow() -> CGFloat {
-            items.reduce(0) { max($0, $1.locked ? $1.size.width : $1.minSize.width) }
+        /// Guillotine packer: place each surface in the free rectangle that
+        /// wastes the least space, then split the rest into a right column and a
+        /// bottom band. Every slot is consumed exactly once, so surfaces can
+        /// never end up on top of each other.
+        func pack(scale: CGFloat, byHeight: Bool) -> [Placement]? {
+            var free = [usable]
+            var result: [Placement] = []
+            let order = items.indices.sorted { a, b in
+                let sa = sizeOf(items[a], scale), sb = sizeOf(items[b], scale)
+                if byHeight {
+                    if abs(sa.height - sb.height) > 1 { return sa.height > sb.height }
+                }
+                return sa.width * sa.height > sb.width * sb.height
+            }
+
+            for i in order {
+                let need = sizeOf(items[i], scale)
+                guard need.width <= usable.width, need.height <= usable.height else { return nil }
+                var bestIndex: Int?
+                var bestScore = CGFloat.greatestFiniteMagnitude
+                for (index, rect) in free.enumerated() {
+                    guard rect.width >= need.width, rect.height >= need.height else { continue }
+                    let score = (rect.width - need.width) * rect.height
+                        + (rect.height - need.height) * rect.width
+                    if score < bestScore { bestScore = score; bestIndex = index }
+                }
+                guard let index = bestIndex else { return nil }
+                let slot = free.remove(at: index)
+                let frame = CGRect(x: slot.minX, y: slot.minY, width: need.width, height: need.height)
+                result.append(Placement(index: i, frame: frame))
+
+                let rightWidth = slot.width - need.width - gap
+                let bottomHeight = slot.height - need.height - gap
+                // Split along the longer remainder so the leftover stays usable.
+                if rightWidth >= 200 && bottomHeight >= 160 {
+                    let right = CGRect(x: slot.minX + need.width + gap, y: slot.minY,
+                                       width: rightWidth, height: need.height)
+                    let bottom = CGRect(x: slot.minX, y: slot.minY + need.height + gap,
+                                        width: slot.width, height: bottomHeight)
+                    free.append(right); free.append(bottom)
+                } else if rightWidth >= 200 {
+                    free.append(CGRect(x: slot.minX + need.width + gap, y: slot.minY,
+                                       width: rightWidth, height: slot.height))
+                } else if bottomHeight >= 160 {
+                    free.append(CGRect(x: slot.minX, y: slot.minY + need.height + gap,
+                                       width: slot.width, height: bottomHeight))
+                }
+            }
+            return result
         }
-        let minimumHeight = totalHeight(0.2)
-        if minimumHeight > usable.height || widestRow() > usable.width {
+
+        // Fit at the surfaces' own sizes if possible; otherwise shrink gently,
+        // never below the minimum each surface needs to render its content.
+        var chosen: [Placement]?
+        var usedScale: CGFloat = 1
+        let scales: [CGFloat] = [1.0, 0.97, 0.94, 0.91, 0.88, 0.85, 0.82, 0.78, 0.74, 0.70, 0.66, 0.62, 0.58]
+        outer: for scale in scales {
+            for byHeight in [true, false] {
+                if let packed = pack(scale: scale, byHeight: byHeight) {
+                    chosen = packed; usedScale = scale
+                    break outer
+                }
+            }
+        }
+
+        guard var placements = chosen else {
             showToast("Not enough room — unlock a few sizes or remove a surface")
-            debugLog("tidy skipped: needs \(Int(minimumHeight))pt, has \(Int(usable.height))pt")
+            debugLog("tidy skipped: no packing fits \(items.count) surfaces")
             return
         }
 
-        var scale: CGFloat = 1
-        if totalHeight(1) > usable.height {
-            var low: CGFloat = 0.2, high: CGFloat = 1
-            for _ in 0..<20 {
-                let mid = (low + high) / 2
-                if totalHeight(mid) <= usable.height { low = mid } else { high = mid }
-            }
-            scale = max(0.2, low)
-        }
-
-        // Shelf packing: rows left to right, wrapping when the row is full. Two
-        // surfaces can never overlap because every slot is consumed in order.
-        var placements: [(index: Int, frame: CGRect)] = []
-        var x = usable.minX
-        var y = usable.minY
-        var rowHeight: CGFloat = 0
-        var overflowed = false
-
-        for (i, item) in items.enumerated() {
-            var w = item.locked ? item.size.width : max(item.minSize.width, item.size.width * scale)
-            var h = item.locked ? item.size.height : max(item.minSize.height, item.size.height * scale)
-            // A surface wider than the workspace is unusable; cap it (only the
-            // flexible ones, a locked size is the user's decision).
-            if !item.locked && w > usable.width { w = usable.width }
-            if w > usable.width { w = usable.width; overflowed = true }
-
-            if x > usable.minX && x + w > usable.maxX {
-                x = usable.minX
-                y += rowHeight + gap
-                rowHeight = 0
-            }
-            if y + h > usable.maxY {
-                // Should not happen (the fit check above), but never leave the
-                // workspace if it does.
-                y = max(usable.minY, usable.maxY - h)
-            }
-
-            placements.append((i, CGRect(x: x, y: y, width: w, height: h)))
-            x += w + gap
-            rowHeight = max(rowHeight, h)
-        }
-
-        // Centre the whole block when it is narrower/shorter than the usable area.
+        // Centre the packed block inside the workspace.
         if style == .grid, let union = placements.map({ $0.frame }).reduce(nil, { (acc: CGRect?, frame: CGRect) in
             acc.map { $0.union(frame) } ?? frame
         }) {
             let dx = max(0, (usable.width - union.width) / 2 - (union.minX - usable.minX))
             let dy = max(0, (usable.height - union.height) / 2 - (union.minY - usable.minY))
-            placements = placements.map { entry in
-                (entry.index, entry.frame.offsetBy(dx: dx, dy: dy))
-            }
+            placements = placements.map { Placement(index: $0.index, frame: $0.frame.offsetBy(dx: dx, dy: dy)) }
         }
 
-        if overflowed {
-            showToast("Not enough room — unlock a few sizes or remove a surface")
-            debugLog("tidy overflow: \(items.count) surfaces, scale \(scale)")
-        }
+        let frames = placements.map { $0.frame }
+        debugLog("tidy packed \(frames.count)/\(items.count) at scale \(usedScale)")
 
         for (step, entry) in placements.enumerated() {
             let item = items[entry.index]
             let frame = entry.frame
-            let delay = Double(step) * 0.04
+            let delay = Double(step) * 0.035
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self else { return }
-                withAnimation(.spring(response: 0.5, dampingFraction: 0.78)) {
+                withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
                     if item.isWidget {
                         guard item.index < self.widgets.count else { return }
                         let widget = self.widgets[item.index]
@@ -933,7 +933,6 @@ private final class OverlayModel: ObservableObject {
                 }
             }
         }
-        debugLog("tidy placed \(placements.count) surfaces, scale \(scale), overflow \(overflowed)")
     }
 
     func addWebsiteFromPicker(_ address: String, in size: CGSize, rect: CGRect? = nil) {
