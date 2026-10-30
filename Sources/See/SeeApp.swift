@@ -756,6 +756,18 @@ private final class OverlayModel: ObservableObject {
     }
 
     @Published var undoOffer: UndoOffer?
+
+    @Published var toast: String?
+    private var toastTimer: Timer?
+
+    func showToast(_ message: String) {
+        toast = message
+        debugLog("toast: \(message)")
+        toastTimer?.invalidate()
+        toastTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: false) { [weak self] _ in
+            DispatchQueue.main.async { self?.toast = nil }
+        }
+    }
     private var undoInsertIndex = 0
     private var undoTimer: Timer?
 
@@ -819,6 +831,8 @@ private final class OverlayModel: ObservableObject {
 
         var remaining = [usable]
         var placed: [Int] = []
+        var overflowed = false
+        var overflowCount = 0
 
         // Big surfaces first: they are the ones with the fewest options.
         let order = items.indices.sorted { a, b in
@@ -847,7 +861,26 @@ private final class OverlayModel: ObservableObject {
                 }
                 slot = big
             }
-            guard let rect = slot else { continue }
+            guard var rect = slot else { continue }
+
+            // A locked item keeps its size, so it may not fit the biggest free
+            // rect. Park it inside the workspace anyway rather than pushing it
+            // off screen, and tell the user why the layout is tight.
+            if need.width > rect.width || need.height > rect.height {
+                overflowed = true
+                overflowCount += 1
+                let x = min(max(rect.minX, usable.minX), usable.maxX - need.width)
+                let y = min(max(rect.minY, usable.minY), usable.maxY - need.height)
+                rect = CGRect(x: x, y: y, width: max(need.width, 1), height: max(need.height, 1))
+                items[i].size = need
+                items[i].center = CGPoint(x: min(max(rect.minX + need.width / 2, usable.minX + need.width / 2),
+                                                usable.maxX - need.width / 2),
+                                          y: min(max(rect.minY + need.height / 2, usable.minY + need.height / 2),
+                                                usable.maxY - need.height / 2))
+                placed.append(i)
+                remaining.removeAll { $0 == rect }
+                continue
+            }
 
             items[i].size = need
             items[i].center = CGPoint(x: rect.minX + need.width / 2, y: rect.minY + need.height / 2)
@@ -873,6 +906,11 @@ private final class OverlayModel: ObservableObject {
             let dx = usable.midX - union.midX
             let dy = usable.midY - union.midY
             for i in placed { items[i].center = CGPoint(x: items[i].center.x + dx, y: items[i].center.y + dy) }
+        }
+
+        if overflowed {
+            showToast("Not enough room — unlock a few widget sizes")
+            debugLog("tidy overflow with \(overflowCount) locked item(s)")
         }
 
         // Apply with a small stagger so the move reads as one gesture.
@@ -2843,12 +2881,13 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
            let popupHost = popupURL.host,
            popupHost == siteHost || popupHost == "www." + siteHost || siteHost == "www." + popupHost,
            popupSawForeignHost {
-            debugLog("popup landed back on the site -> \(popupURL.absoluteString)")
-            if let mainView = self.webView as WKWebView? {
-                mainView.load(URLRequest(url: popupURL))
-            }
+            debugLog("popup landed back on the site -> reloading the surface")
             popupSawForeignHost = false
             dismissPopup()
+            // The popup shares this web view's cookie store, so the session is
+            // already here; reload instead of loading the callback page (which
+            // can be a blank hand-off page and leaves the widget black).
+            self.webView.reload()
             return
         }
         if let host = webView.url?.host, host != URL(string: site.address)?.host {
@@ -2904,6 +2943,7 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
         addSubview(child, positioned: .below, relativeTo: handles)
         popup = child
         addPopupCloseButton(over: child)
+        installPopupEscape()
         if let url = navigationAction.request.url { child.load(URLRequest(url: url)) }
         debugLog("popup opened \(navigationAction.request.url?.absoluteString ?? "-")")
         return child
@@ -2916,6 +2956,23 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
     }
 
     private var popupCloseButton: NSButton?
+    private var popupKeyMonitor: Any?
+
+    /// Escape closes a sign-in sheet, the way it closes a browser window.
+    private func installPopupEscape() {
+        guard popupKeyMonitor == nil else { return }
+        popupKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, self.popup != nil else { return event }
+            guard event.keyCode == 53 else { return event }
+            self.dismissPopup()
+            return nil
+        }
+    }
+
+    private func removePopupEscape() {
+        if let popupKeyMonitor { NSEvent.removeMonitor(popupKeyMonitor) }
+        popupKeyMonitor = nil
+    }
 
     private func addPopupCloseButton(over child: WKWebView) {
         popupCloseButton?.removeFromSuperview()
@@ -2935,6 +2992,7 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
     @objc private func closePopupTapped() { dismissPopup() }
 
     private func dismissPopup() {
+        removePopupEscape()
         popupSawForeignHost = false
         popup?.removeFromSuperview()
         popup = nil
@@ -3174,6 +3232,37 @@ private func surfaceCursorZone(_ p: CGPoint, _ rect: CGRect, close: Bool) -> Sur
     return nil
 }
 
+/// A short message that slides up from the bottom of the workspace.
+@MainActor
+private struct ToastBanner: View {
+    let message: String
+
+    var body: some View {
+        VStack {
+            Spacer()
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color(red: 1.0, green: 0.78, blue: 0.35))
+                Text(message)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.92))
+            }
+            .padding(.horizontal, 16).padding(.vertical, 11)
+            .background {
+                Capsule().fill(.ultraThinMaterial)
+                    .overlay(Capsule().fill(Color.black.opacity(0.45)))
+            }
+            .overlay(Capsule().strokeBorder(.white.opacity(0.10), lineWidth: 0.5))
+            .shadow(color: .black.opacity(0.4), radius: 18, y: 8)
+            .padding(.bottom, 54)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .allowsHitTesting(false)
+        .animation(.spring(response: 0.34, dampingFraction: 0.86), value: message)
+    }
+}
+
 @MainActor
 private final class UndoMeter: ObservableObject {
     @Published var remaining: CGFloat = 1
@@ -3365,6 +3454,13 @@ private struct SeeOverlay: View {
                         .transition(.asymmetric(
                             insertion: .opacity.combined(with: .scale(scale: 0.94)),
                             removal: .opacity.combined(with: .scale(scale: 0.92))))
+                }
+
+                // Transient message, e.g. when a tidy cannot fit locked sizes
+                if let toast = model.toast {
+                    ToastBanner(message: toast)
+                        .zIndex(70)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
 
                 // Undo a removal, right where the surface was
