@@ -253,6 +253,7 @@ private struct WorkspaceInteractionMonitor: NSViewRepresentable {
     let onDismiss: (CGPoint) -> Void
     let isSurfaceAt: (CGPoint) -> Bool
     let contextMenuFrame: () -> CGRect?
+    let onTouch: (CGPoint) -> Void         // raise whatever was touched
     let onZapAt: (CGPoint) -> Bool         // true when a zapping surface took the click
     let onDragCreating: (CGRect) -> Void   // live rect while drawing
     let onDragCreated: (CGRect) -> Void    // final rect on mouseUp
@@ -268,6 +269,7 @@ private struct WorkspaceInteractionMonitor: NSViewRepresentable {
         v.onDismiss = onDismiss
         v.isSurfaceAt = isSurfaceAt
         v.contextMenuFrame = contextMenuFrame
+        v.onTouch = onTouch
         v.onZapAt = onZapAt
         v.onDragCreating = onDragCreating
         v.onDragCreated = onDragCreated
@@ -281,6 +283,7 @@ final class WorkspaceInteractionView: NSView {
     var onDismiss: ((CGPoint) -> Void)?
     var isSurfaceAt: ((CGPoint) -> Bool)?
     var contextMenuFrame: (() -> CGRect?)?
+    var onTouch: ((CGPoint) -> Void)?
     var onZapAt: ((CGPoint) -> Bool)?
     var onDragCreating: ((CGRect) -> Void)?
     var onDragCreated: ((CGRect) -> Void)?
@@ -311,6 +314,7 @@ final class WorkspaceInteractionView: NSView {
             switch event.type {
             case .rightMouseDown:
                 debugLog("right down at \(point)")
+                self.onTouch?(point)
                 self.onRightClick?(point); return nil
             case .leftMouseDown:
                 // The panel re-delivers a single physical click while it becomes
@@ -321,6 +325,7 @@ final class WorkspaceInteractionView: NSView {
                     return nil
                 }
                 self.lastDownTime = t; self.lastDownPoint = point
+                self.onTouch?(point)
                 if MenuHover.shared.invoke(at: point) {
                     // The action ran on mouse-down; swallow its mouse-up so a
                     // control that appears under the pointer cannot act on the
@@ -540,6 +545,7 @@ private final class OverlayModel: ObservableObject {
                                        size: CGSize(width: item.w, height: item.h), note: item.note)
         }
         if !websites.isEmpty || !widgets.isEmpty { hasPlacedInitialSite = true }
+        adoptStackingOrder()
         debugLog("restored \(websites.count) sites, \(widgets.count) widgets")
     }
 
@@ -568,14 +574,20 @@ private final class OverlayModel: ObservableObject {
     // MARK: Surface hit testing
 
     func website(at point: CGPoint) -> WebsiteSurface? {
-        websites.last { site in
+        websites.filter { site in
+            CGRect(x: site.center.x - site.size.width / 2, y: site.center.y - site.size.height / 2,
+                   width: site.size.width, height: site.size.height).contains(point)
+        }.max(by: { $0.z < $1.z }) ?? websites.last { site in
             CGRect(x: site.center.x - site.size.width / 2, y: site.center.y - site.size.height / 2,
                    width: site.size.width, height: site.size.height).contains(point)
         }
     }
 
     func widget(at point: CGPoint) -> NativeWidgetSurface? {
-        widgets.last { widget in
+        widgets.filter { widget in
+            CGRect(x: widget.center.x - widget.size.width / 2, y: widget.center.y - widget.size.height / 2,
+                   width: widget.size.width, height: widget.size.height).contains(point)
+        }.max(by: { $0.z < $1.z }) ?? widgets.last { widget in
             CGRect(x: widget.center.x - widget.size.width / 2, y: widget.center.y - widget.size.height / 2,
                    width: widget.size.width, height: widget.size.height).contains(point)
         }
@@ -588,6 +600,53 @@ private final class OverlayModel: ObservableObject {
         } else if let widget = widget(at: point) {
             surfaceMenu = SurfaceMenuTarget(site: nil, widget: widget, point: point)
         }
+    }
+
+    // MARK: Stacking
+
+    private var zTop: Double = 10
+
+    func adoptStackingOrder() {
+        for (i, site) in websites.enumerated() { site.z = Double(i + 1) }
+        zTop = Double(max(websites.count, widgets.count) + 10)
+        for (i, widget) in widgets.enumerated() { widget.z = Double(i + 1) }
+    }
+
+    func bringToFront(_ site: WebsiteSurface) {
+        zTop += 1
+        site.z = zTop
+        compressStack()
+    }
+
+    func bringToFront(_ widget: NativeWidgetSurface) {
+        zTop += 1
+        widget.z = zTop
+        compressStack()
+    }
+
+    /// Keeps every surface below the See chrome (which sits at 50+).
+    private func compressStack() {
+        guard zTop > 40 else { return }
+        var order: [(z: Double, apply: (Double) -> Void)] =
+            websites.map { site in (site.z, { site.z = $0 }) } +
+            widgets.map { widget in (widget.z, { widget.z = $0 }) }
+        order.sort { $0.z < $1.z }
+        for (i, entry) in order.enumerated() { entry.apply(Double(i + 1)) }
+        zTop = Double(order.count + 2)
+    }
+
+    /// Whoever the pointer touches last sits on top.
+    func raiseSurface(at point: CGPoint) {
+        if let site = website(at: point) {
+            model_focus(site)
+            bringToFront(site)
+        } else if let widget = widget(at: point) {
+            bringToFront(widget)
+        }
+    }
+
+    private func model_focus(_ site: WebsiteSurface) {
+        focusedID = site.id
     }
 
     // MARK: Smart placement: find an empty region
@@ -1968,6 +2027,8 @@ private final class NativeWidgetSurface: ObservableObject, Identifiable {
     @Published var size: CGSize
     @Published var note: String
     @Published var isDragging = false
+    /// Stacking order: the surface touched last carries the highest value.
+    @Published var z: Double = 0
 
     init(kind: NativeWidgetKind, center: CGPoint, id: UUID = UUID(), size: CGSize? = nil, note: String = "") {
         self.id = id; self.kind = kind; self.center = center
@@ -2004,6 +2065,8 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     @Published var config: WebsiteConfig
     @Published var scrollY: Double = 0
     @Published var isPickingElements = false
+    /// Stacking order: the surface touched last carries the highest value.
+    @Published var z: Double = 0
     /// Elements the page itself has zapped, mirrored here for the config panel.
     @Published private(set) var zapped: [ZappedSummary] = []
     /// Cursor the page itself wants at the last probed point (`pointer`, `text`…).
@@ -2381,7 +2444,7 @@ private struct WebsiteView: NSViewRepresentable {
 }
 
 @MainActor
-private final class WebsiteHostView: NSView, WKNavigationDelegate {
+private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate {
     private let site: WebsiteSurface
     let webView: WKWebView
     private let handles: WebsiteHandleView
@@ -2404,18 +2467,58 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate {
         controller.add(handler, name: "seeCursor")
         controller.add(handler, name: "seeZap")
         configuration.userContentController = controller
+        // Sign-in flows ("Continue with Google") are popups; without this the
+        // button does nothing at all.
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init(frame: .zero)
         bridge.site = site
         bridge.onPick = onPick
         webView.navigationDelegate = self
+        webView.uiDelegate = self
         addSubview(webView); addSubview(handles, positioned: .above, relativeTo: webView)
     }
     required init?(coder: NSCoder) { fatalError() }
     override var isFlipped: Bool { true }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        site.didFinishLoad(in: webView)
+        if webView === self.webView { site.didFinishLoad(in: webView) }
+    }
+
+    // MARK: Popups (sign-in with Google and friends)
+
+    private var popup: WKWebView?
+
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        guard navigationAction.targetFrame == nil else { return nil }
+        let child = WKWebView(frame: bounds, configuration: configuration)
+        child.autoresizingMask = [.width, .height]
+        child.customUserAgent = site.config.userAgent.string
+        child.navigationDelegate = self
+        child.uiDelegate = self
+        addSubview(child, positioned: .below, relativeTo: handles)
+        popup = child
+        if let url = navigationAction.request.url { child.load(URLRequest(url: url)) }
+        debugLog("popup opened \(navigationAction.request.url?.absoluteString ?? "-")")
+        return child
+    }
+
+    func webViewDidClose(_ webView: WKWebView) {
+        guard webView !== self.webView else { return }
+        webView.removeFromSuperview()
+        if popup === webView { popup = nil }
+        debugLog("popup closed")
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+        completionHandler()
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        completionHandler(true)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -2738,7 +2841,7 @@ private struct SeeOverlay: View {
                         .animation(.spring(response: 0.26, dampingFraction: 0.74)
                             .delay(Double(index) * 0.012), value: appeared)
                         .animation(.easeOut(duration: 0.18), value: model.configuring?.id)
-                        .zIndex(model.focusedID == site.id ? 2 : Double(index))
+                        .zIndex(site.z)
                         .transition(.asymmetric(
                             insertion: .opacity.combined(with: .scale(scale: 0.94)),
                             removal: .opacity.combined(with: .scale(scale: 0.92))))
@@ -2751,7 +2854,7 @@ private struct SeeOverlay: View {
                         .opacity(model.configuring == nil ? (appeared ? 1 : 0) : 0)
                         .animation(.spring(response: 0.26, dampingFraction: 0.74)
                             .delay(Double(model.websites.count + index) * 0.012), value: appeared)
-                        .zIndex(3 + Double(index))
+                        .zIndex(widget.z)
                         .transition(.asymmetric(
                             insertion: .opacity.combined(with: .scale(scale: 0.94)),
                             removal: .opacity.combined(with: .scale(scale: 0.92))))
@@ -2808,6 +2911,7 @@ private struct SeeOverlay: View {
                     },
                     isSurfaceAt: { pt in isPointOverSurface(pt, size: size) },
                     contextMenuFrame: { activeMenuFrame(in: size) },
+                    onTouch: { point in model.raiseSurface(at: point) },
                     onZapAt: { point in
                         guard let site = model.websites.first(where: { $0.isPickingElements }) else { return false }
                         let rect = CGRect(x: site.center.x - site.size.width / 2,
@@ -3463,7 +3567,8 @@ private struct NativeWidgetView: View {
             TimelineView(.periodic(from: .now, by: 1)) { ctx in
                 VStack(alignment: .center, spacing: 8) {
                     Text(ctx.date, format: .dateTime.hour().minute())
-                        .font(.system(size: 54, weight: .semibold, design: .default))
+                        .font(.system(size: 56, weight: .light, design: .default))
+                        .tracking(-1.2)
                         .monospacedDigit().foregroundStyle(ink)
                     VStack(spacing: 3) {
                         Text(ctx.date, format: .dateTime.weekday(.wide).month(.wide).day())
@@ -3598,7 +3703,8 @@ private struct TimerView: View {
         let total = Int(entry.remaining.rounded())
         VStack(spacing: 12) {
             Text(String(format: "%02d:%02d", total / 60, total % 60))
-                .font(.system(size: 52, weight: .semibold, design: .default))
+                .font(.system(size: 52, weight: .light, design: .default))
+                .tracking(-1.0)
                 .monospacedDigit().foregroundStyle(ink)
             HStack(spacing: 10) {
                 Button { store.toggle(widget.id, minutes: minutes) } label: {
@@ -3640,9 +3746,9 @@ private struct BatteryView: View {
     var body: some View {
         VStack(spacing: 10) {
             HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text("\(power.percent)").font(.system(size: 56, weight: .heavy, design: .rounded))
+                Text("\(power.percent)").font(.system(size: 52, weight: .medium))
                     .monospacedDigit().foregroundStyle(ink)
-                Text("%").font(.system(size: 20, weight: .semibold)).foregroundStyle(ink.opacity(0.6))
+                Text("%").font(.system(size: 19, weight: .regular)).foregroundStyle(ink.opacity(0.55))
             }
             Text(power.state).font(.system(size: 11, weight: .semibold)).tracking(1.2)
                 .foregroundStyle(ink.opacity(0.55))
@@ -4329,7 +4435,7 @@ private struct ConfigureWidgetOverlay: View {
                                 HStack(spacing: 5) {
                                     Image(systemName: site.isPickingElements ? "checkmark" : "bolt.slash.fill")
                                         .font(.system(size: 9, weight: .bold))
-                                    Text(site.isPickingElements ? "Done" : "Zap…")
+                                    Text(site.isPickingElements ? "Done" : "Zap")
                                         .font(.system(size: 11.5, weight: .semibold))
                                         .tracking(0.2)
                                 }
