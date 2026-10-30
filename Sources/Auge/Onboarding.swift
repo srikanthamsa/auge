@@ -81,8 +81,8 @@ final class OnboardingAudio {
     /// Seconds of score to use, counted from the beginning of the file. Long
     /// sources (a stream rip, say) are cut here and faded out rather than
     /// looping forever.
-    private let clip: TimeInterval = 46
-    private let fadeOut: TimeInterval = 4
+    private let clip: TimeInterval = 110
+    private let fadeOut: TimeInterval = 6
 
     func play() {
         guard player == nil, let url else { return }
@@ -539,9 +539,21 @@ private struct TabStripMock: View {
     @StateObject private var fade = FadeIn()
     private let tints: [Color] = [.red, .blue, .green, .purple, .orange, .teal, .pink, .indigo, .yellow]
 
+    private var capturedChrome: NSImage? {
+        guard let url = Bundle.main.url(forResource: "browser-tabs", withExtension: "png") else { return nil }
+        return NSImage(contentsOf: url)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
+            if let chrome = capturedChrome {
+                // Real macOS tab strip, lifted from the reference walkthrough.
+                Image(nsImage: chrome)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: .infinity)
+            } else {
+                HStack(spacing: 8) {
                 ForEach(Array(tints.enumerated()), id: \.offset) { index, tint in
                     HStack(spacing: 5) {
                         Circle().fill(tint.opacity(0.9)).frame(width: 9, height: 9)
@@ -554,8 +566,9 @@ private struct TabStripMock: View {
                 Image(systemName: "plus").font(.system(size: 10)).foregroundStyle(.white.opacity(0.45))
                 Spacer()
             }
-            .padding(9)
-            .background(.white.opacity(0.09))
+                .padding(9)
+                .background(.white.opacity(0.09))
+            }
             HStack(spacing: 9) {
                 Image(systemName: "chevron.left").font(.system(size: 10)).foregroundStyle(.white.opacity(0.3))
                 HStack(spacing: 6) {
