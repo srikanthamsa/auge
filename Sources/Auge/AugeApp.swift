@@ -43,11 +43,13 @@ enum AppBrand {
     }
 
     static var menuMark: NSImage? {
-        guard let mark = image("AugeMarkTemplate") else {
+        guard let mark = image("AugeMenuMark") ?? image("AugeMarkTemplate") else {
             return NSImage(systemSymbolName: "eye", accessibilityDescription: "Auge")
         }
+        // The artwork is 2:1; keep its shape and sit it at menu-bar height.
         mark.isTemplate = true
-        mark.size = NSSize(width: 18, height: 18)
+        let height: CGFloat = 17
+        mark.size = NSSize(width: height * mark.size.width / mark.size.height, height: height)
         return mark
     }
 }
@@ -82,6 +84,10 @@ private final class AugeAppDelegate: NSObject, NSApplicationDelegate {
         guard statusItem == nil else { return }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem?.button?.image = AppBrand.menuMark
+        // Template images take their tint from the button's appearance; without
+        // this the eye rendered black on a dark menu bar.
+        let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        statusItem?.button?.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         statusItem?.button?.action = #selector(togglePanel)
         statusItem?.button?.target = self
         statusItem?.button?.toolTip = "AUGE — See beyond the window."
