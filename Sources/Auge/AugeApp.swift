@@ -90,7 +90,7 @@ private final class AugeAppDelegate: NSObject, NSApplicationDelegate {
         statusItem?.button?.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         statusItem?.button?.action = #selector(togglePanel)
         statusItem?.button?.target = self
-        statusItem?.button?.toolTip = "AUGE — See beyond the window."
+        statusItem?.button?.toolTip = "AUGE: See Beyond."
         // First run: the introduction owns the screen; the workspace follows it.
         if !OnboardingController.shared.hasCompleted {
             OnboardingController.shared.presentIfNeeded { [weak self] in self?.showPanel() }
@@ -108,7 +108,7 @@ private final class AugeAppDelegate: NSObject, NSApplicationDelegate {
     @objc private func showAbout() {
         let alert = NSAlert()
         alert.messageText = "Auge"
-        alert.informativeText = "See beyond the window.\n\nWebsites, files and widgets in a freeform workspace."
+        alert.informativeText = "AUGE: See Beyond.\n\nWebsites, files and widgets in a freeform workspace."
         if let icon = AppBrand.icon { alert.icon = icon }
         alert.addButton(withTitle: "OK")
         NSApp.activate(ignoringOtherApps: true)
@@ -6722,7 +6722,7 @@ private struct WorkspaceOptionsOverlay: View {
                     }
                     .padding(.top, 4)
                 case .settings:
-                    Text("AUGE — See beyond the window.\nWebsites, files and widgets in a freeform workspace.")
+                    Text("AUGE: See Beyond.\nWebsites, files and widgets in a freeform workspace.")
                         .font(.system(size: 12)).foregroundStyle(.white.opacity(0.65))
                 }
             }
