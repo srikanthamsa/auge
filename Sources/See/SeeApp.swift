@@ -1,4 +1,5 @@
 import AppKit
+import EventKit
 import IOKit.ps
 import QuartzCore
 import AVFoundation
@@ -4309,32 +4310,7 @@ private struct NativeWidgetView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
         case .calendar:
-            VStack(alignment: .leading, spacing: 12) {
-                Text(Date.now, format: .dateTime.month(.wide).year())
-                    .font(.system(size: 18, weight: .semibold)).foregroundStyle(ink)
-                let symbols = Calendar.current.veryShortStandaloneWeekdaySymbols
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 7), spacing: 6) {
-                    ForEach(Array(symbols.enumerated()), id: \.offset) { _, day in
-                        Text(day).font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(ink.opacity(0.40))
-                            .frame(height: 16)
-                    }
-                    ForEach(Array(Calendar.current.range(of: .day, in: .month, for: .now) ?? 1..<29), id: \.self) { day in
-                        let today = Calendar.current.component(.day, from: .now) == day
-                        Text("\(day)")
-                            .font(.system(size: 12, weight: today ? .semibold : .regular))
-                            .monospacedDigit()
-                            .foregroundStyle(today ? Color.white : ink.opacity(0.85))
-                            .frame(width: 26, height: 26)
-                            .background {
-                                if today {
-                                    Circle().fill(Color.accentColor)
-                                }
-                            }
-                            .frame(height: 26)
-                    }
-                }
-            }
+            AgendaTimelineView(widget: widget, ink: ink)
         case .note:
             VStack(alignment: .leading, spacing: 12) {
                 Label("Quick Note", systemImage: "note.text")
@@ -4366,6 +4342,317 @@ private struct NativeWidgetView: View {
         case .cricket:
             CricketView(widget: widget, ink: ink)
         }
+    }
+}
+
+// MARK: - Calendar timeline
+
+/// Today's meetings, hour by hour, straight out of the user's calendars.
+@MainActor
+private final class AgendaStore: ObservableObject {
+    static let shared = AgendaStore()
+
+    enum Access { case pending, granted, denied }
+
+    struct Meeting: Identifiable {
+        let id: String
+        let title: String
+        let start: Date
+        let end: Date
+        let allDay: Bool
+        let tint: Color
+        let source: String
+    }
+
+    @Published private(set) var access: Access = .pending
+    @Published private(set) var meetings: [Meeting] = []
+
+    private let store = EKEventStore()
+    private var timer: Timer?
+    private var started = false
+    private var observer: NSObjectProtocol?
+
+    func start() async {
+        guard !started else { return }
+        started = true
+        switch EKEventStore.authorizationStatus(for: .event) {
+        case .fullAccess, .authorized:
+            access = .granted
+        case .denied, .restricted, .writeOnly:
+            access = .denied
+        default:
+            let ok = (try? await store.requestFullAccessToEvents()) ?? false
+            access = ok ? .granted : .denied
+            debugLog("calendar access \(ok)")
+        }
+        reload()
+        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.reload() }
+        }
+        observer = NotificationCenter.default.addObserver(forName: .EKEventStoreChanged,
+                                                         object: store, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.reload() }
+        }
+    }
+
+    func reload() {
+        guard access == .granted else { return }
+        let cal = Calendar.current
+        let from = cal.date(byAdding: .hour, value: -2, to: Date()) ?? Date()
+        let to = cal.date(byAdding: .day, value: 14, to: cal.startOfDay(for: Date())) ?? Date()
+        let found = store.events(matching: store.predicateForEvents(withStart: from, end: to, calendars: nil))
+        meetings = found
+            .filter { !$0.isDetached && $0.status != .canceled }
+            .map { event in
+                Meeting(id: event.eventIdentifier ?? UUID().uuidString,
+                        title: (event.title?.isEmpty == false ? event.title! : "Untitled"),
+                        start: event.startDate, end: event.endDate,
+                        allDay: event.isAllDay,
+                        tint: Color(nsColor: event.calendar.color),
+                        source: event.calendar.title)
+            }
+            .sorted { $0.start < $1.start }
+        debugLog("calendar \(meetings.count) meetings " + meetings.prefix(3).map { "\($0.start) \($0.title)" }.joined(separator: " | "))
+    }
+}
+
+private struct AgendaTimelineView: View {
+    @ObservedObject var widget: NativeWidgetSurface
+    let ink: Color
+    @StateObject private var store = AgendaStore.shared
+
+    private var cal: Calendar { .current }
+    private var rowHeight: CGFloat { 46 }
+
+    /// First hour shown: the hour it is now, so the top of the list is "now".
+    private var startHour: Date {
+        let comps = cal.dateComponents([.year, .month, .day, .hour], from: Date())
+        return cal.date(from: comps) ?? Date()
+    }
+
+    private var hours: [Date] {
+        (0..<14).compactMap { cal.date(byAdding: .hour, value: $0, to: startHour) }
+    }
+
+    /// Still running or yet to start.
+    private var upcoming: [AgendaStore.Meeting] {
+        store.meetings.filter { !$0.allDay && $0.end > Date().addingTimeInterval(-60) }
+    }
+    /// What fits the hour grid: the next fourteen hours from the current one.
+    private var inTimeline: [AgendaStore.Meeting] {
+        upcoming.filter { $0.start < startHour.addingTimeInterval(14 * 3600) }
+    }
+    private var allDay: [AgendaStore.Meeting] {
+        store.meetings.filter { $0.allDay && cal.isDateInToday($0.start) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            header
+            switch store.access {
+            case .pending:
+                placeholder("Looking at your calendars…")
+            case .denied:
+                placeholder("Calendar access is off.\nSystem Settings › Privacy & Security › Calendars › See")
+            default:
+                if !inTimeline.isEmpty {
+                    timeline
+                } else if !upcoming.isEmpty {
+                    nextUp
+                } else {
+                    placeholder("Nothing on the calendar")
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .task { await store.start() }
+    }
+
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text("TODAY")
+                .font(.system(size: 10, weight: .semibold)).tracking(0.9)
+                .foregroundStyle(ink.opacity(0.42))
+            Text(Date.now, format: .dateTime.weekday(.abbreviated).day().month(.abbreviated))
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(ink.opacity(0.9))
+            Spacer(minLength: 0)
+            if !upcoming.isEmpty {
+                Text("\(upcoming.count)")
+                    .font(.system(size: 10, weight: .semibold)).monospacedDigit()
+                    .foregroundStyle(ink.opacity(0.4))
+            }
+        }
+    }
+
+    private func placeholder(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11.5))
+            .foregroundStyle(ink.opacity(0.45))
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var timeline: some View {
+        ScrollViewReader { proxy in
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 0) {
+                    if !allDay.isEmpty {
+                        allDayStrip
+                    }
+                    ForEach(Array(hours.enumerated()), id: \.offset) { _, hour in
+                        hourRow(hour)
+                            .id(hour)
+                    }
+                }
+                .padding(.trailing, 2)
+            }
+            .onAppear { proxy.scrollTo(startHour, anchor: .top) }
+        }
+    }
+
+    /// Nothing in the next fourteen hours: show what is actually next, with the
+    /// day it falls on, instead of an empty grid.
+    private var nextUp: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("NEXT UP")
+                .font(.system(size: 9.5, weight: .semibold)).tracking(0.8)
+                .foregroundStyle(ink.opacity(0.35))
+            ForEach(upcoming.prefix(5)) { meeting in
+                HStack(alignment: .top, spacing: 6) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(meeting.title)
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundStyle(ink.opacity(0.9))
+                            .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                        Text(dayAndTime(meeting))
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(ink.opacity(0.45))
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.leading, 11).padding(.trailing, 5)
+                .padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 7).fill(meeting.tint.opacity(0.12)))
+                .overlay(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 1.5).fill(meeting.tint)
+                        .frame(width: 3).padding(.vertical, 4)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func dayAndTime(_ meeting: AgendaStore.Meeting) -> String {
+        let day = DateFormatter()
+        day.setLocalizedDateFormatFromTemplate(cal.isDateInToday(meeting.start) ? "j:mm"
+                                               : cal.isDateInTomorrow(meeting.start) ? "'Tomorrow' j:mm"
+                                               : "EEE d MMM j:mm")
+        return day.string(from: meeting.start)
+    }
+
+    private var allDayStrip: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            ForEach(allDay.prefix(3)) { meeting in
+                HStack(spacing: 5) {
+                    RoundedRectangle(cornerRadius: 1.5).fill(meeting.tint).frame(width: 3, height: 12)
+                    Text(meeting.title)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(ink.opacity(0.8)).lineLimit(1)
+                    Spacer(minLength: 0)
+                    Text("all day").font(.system(size: 9.5)).foregroundStyle(ink.opacity(0.35))
+                }
+            }
+        }
+        .padding(.bottom, 6)
+    }
+
+    private func hourRow(_ hour: Date) -> some View {
+        let items = inTimeline.filter { $0.start >= hour && $0.start < hour.addingTimeInterval(3600) }
+        let isNow = cal.isDate(Date(), equalTo: hour, toGranularity: .hour)
+        let startsDay = cal.startOfDay(for: hour) != cal.startOfDay(for: hour.addingTimeInterval(-3600))
+        return VStack(alignment: .leading, spacing: 0) {
+            if startsDay {
+                Text(hour, format: .dateTime.weekday(.wide))
+                    .font(.system(size: 9.5, weight: .semibold)).tracking(0.6)
+                    .foregroundStyle(ink.opacity(0.35))
+                    .padding(.top, 2)
+            }
+            HStack(alignment: .top, spacing: 8) {
+                Text(hour, format: .dateTime.hour())
+                    .font(.system(size: 10.5, weight: isNow ? .semibold : .regular))
+                    .monospacedDigit()
+                    .foregroundStyle(isNow ? ink.opacity(0.85) : ink.opacity(0.34))
+                    .frame(width: 40, alignment: .leading)
+                    .padding(.top, 2)
+                ZStack(alignment: .topLeading) {
+                    Rectangle().fill(ink.opacity(0.07)).frame(height: 1).padding(.top, 8)
+                    VStack(spacing: 3) {
+                        ForEach(items) { meeting in
+                            eventBlock(meeting)
+                        }
+                    }
+                    if isNow {
+                        nowLine.offset(y: nowOffset)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .frame(minHeight: rowHeight, alignment: .top)
+        }
+    }
+
+    private var nowOffset: CGFloat {
+        let comps = cal.dateComponents([.minute], from: Date())
+        let fraction = CGFloat(comps.minute ?? 0) / 60
+        return 8 + fraction * (rowHeight - 12)
+    }
+
+    private var nowLine: some View {
+        HStack(spacing: 3) {
+            Circle().fill(Color(red: 1, green: 0.36, blue: 0.33)).frame(width: 5, height: 5)
+            Rectangle().fill(Color(red: 1, green: 0.36, blue: 0.33).opacity(0.85)).frame(height: 1)
+        }
+    }
+
+    private func eventBlock(_ meeting: AgendaStore.Meeting) -> some View {
+        let running = meeting.start <= Date() && meeting.end > Date()
+        return HStack(alignment: .top, spacing: 6) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(meeting.title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(ink.opacity(0.92))
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 4) {
+                    Text(timeRange(meeting))
+                        .font(.system(size: 10, weight: running ? .semibold : .regular))
+                        .monospacedDigit()
+                        .foregroundStyle(running ? meeting.tint : ink.opacity(0.45))
+                    if running {
+                        Text("now").font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(meeting.tint)
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.leading, 11).padding(.trailing, 5)
+        .padding(.vertical, 3)
+        .background(RoundedRectangle(cornerRadius: 7).fill(meeting.tint.opacity(running ? 0.20 : 0.12)))
+        .overlay(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 1.5).fill(meeting.tint)
+                .frame(width: 3).padding(.vertical, 3)
+        }
+    }
+
+    private func timeRange(_ meeting: AgendaStore.Meeting) -> String {
+        let formatter = DateFormatter()
+        formatter.setLocalizedDateFormatFromTemplate("j:mm")
+        let end = formatter.string(from: meeting.end)
+        formatter.setLocalizedDateFormatFromTemplate("j:mm")
+        return formatter.string(from: meeting.start) + "–" + end
     }
 }
 
