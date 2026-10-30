@@ -2998,47 +2998,31 @@ private final class PageLoadBeamView: NSView {
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    /// WebKit flaps `isLoading` and jumps progress in big steps, so the beam
-    /// follows progress only, grows monotonically within a load, and needs a
-    /// quiet moment before it treats the load as finished. Without this the
-    /// line ran left-right-left-right and was far too fast.
-    func update(progress value: Double, active: Bool) {
+    /// One pass per navigation, driven by the navigation delegate rather than
+    /// by `isLoading` and `estimatedProgress`: WebKit restarts both when a
+    /// redirect or a subresource arrives, which is what made the line jump back
+    /// to a smaller percentage and run again. Progress may only push the head
+    /// forward within a pass.
+    func begin() {
         guard bounds.width > 0 else { return }
+        guard phase != .loading else { return }   // a redirect continues the pass
+        beginLoad()
+    }
+
+    func grow(progress value: Double) {
+        guard bounds.width > 0, phase == .loading else { return }
         let clamped = min(max(value, 0), 1)
-
-        switch phase {
-        case .idle:
-            // Nothing is loading and nothing may start the line but a load.
-            guard active else { return }
-            beginLoad()
-        case .finishing:
-            // A stray tick must not restart the wipe; only a fresh load can.
-            guard active, clamped < 0.5 else { return }
-            beginLoad()
-        case .loading:
-            if clamped < lastProgress - 0.25 { beginLoad() }
-        }
-
-        lastProgress = clamped
-        let target = max(2, bounds.width * CGFloat(clamped))
-        if target > head || clamped < 0.02 { head = target }
+        lastProgress = max(lastProgress, clamped)
+        let target = max(2, bounds.width * CGFloat(lastProgress))
+        if target > head { head = target }
         animateReveal(duration: 0.34)
+    }
 
-        if active {
-            pendingFinish?.cancel()
-            pendingFinish = nil
-        } else if pendingFinish == nil {
-            // Wait for a quiet beat: isLoading drops to false between the main
-            // resource and its subresources, and every dip used to restart the
-            // completion wipe.
-            let work = DispatchWorkItem { [weak self] in
-                guard let self, self.phase == .loading else { return }
-                self.pendingFinish = nil
-                self.finishLoad()
-            }
-            pendingFinish = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.22, execute: work)
-        }
+    func complete() {
+        guard bounds.width > 0, phase == .loading else { return }
+        pendingFinish?.cancel()
+        pendingFinish = nil
+        finishLoad()
     }
 
     private func beginLoad() {
@@ -3161,7 +3145,6 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
         webView.addObserver(self, forKeyPath: #keyPath(WKWebView.estimatedProgress), options: [.new], context: nil)
         webView.addObserver(self, forKeyPath: #keyPath(WKWebView.isLoading), options: [.new], context: nil)
         beam.autoresizingMask = [.width, .minYMargin]
-        startFakeProgress()
         addSubview(webView)
         addSubview(beam)
         addSubview(handles, positioned: .above, relativeTo: beam)
@@ -3177,11 +3160,9 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
         case #keyPath(WKWebView.estimatedProgress):
             let value = webView.estimatedProgress
             if value > site.loadProgress || value >= 1 { site.loadProgress = value }
-            beam.update(progress: site.loadProgress, active: webView.isLoading)
+            if !harnessActive { beam.grow(progress: site.loadProgress) }
         case #keyPath(WKWebView.isLoading):
             site.isLoading = webView.isLoading
-            if webView.isLoading { site.loadProgress = max(0, min(site.loadProgress, 0.08)) }
-            beam.update(progress: site.loadProgress, active: webView.isLoading)
         default:
             super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
         }
@@ -3192,16 +3173,20 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
     func startFakeProgress() {
         guard ProcessInfo.processInfo.environment["AUGE_FAKE_PROGRESS"] != nil else { return }
         fakeStart = Date()
-        Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
+        fakeTimer?.invalidate()
+        beam.begin()
+        fakeTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, let started = self.fakeStart else { return }
                 let p = min(1, Date().timeIntervalSince(started) / 3.0)
-                self.beam.update(progress: p, active: p < 1)
+                self.beam.grow(progress: p)
+                if p >= 1 { self.beam.complete(); self.fakeTimer?.invalidate() }
             }
         }
     }
 
     private var fakeStart: Date?
+    private var fakeTimer: Timer?
 
     func stopObservingProgress() {
         webView.removeObserver(self, forKeyPath: #keyPath(WKWebView.estimatedProgress))
@@ -3212,6 +3197,7 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         if webView === self.webView {
+            if !harnessActive { beam.complete() }
             site.didFinishLoad(in: webView)
             return
         }
@@ -3355,13 +3341,25 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
         completionHandler(true)
     }
 
+    var harnessActive: Bool {
+        ProcessInfo.processInfo.environment["AUGE_FAKE_PROGRESS"] != nil
+    }
+
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        guard webView === self.webView, !harnessActive else { return }
+        site.loadProgress = 0
+        beam.begin()
+    }
+
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         debugLog("nav fail \(site.title): \(error.localizedDescription)")
+        if webView === self.webView { beam.complete() }
         if webView === popup { dismissPopup() }
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         debugLog("nav provisional fail \(site.title): \(error.localizedDescription)")
+        if webView === self.webView { beam.complete() }
         if webView === popup { dismissPopup() }
     }
 
@@ -3370,6 +3368,7 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
         // Without this AppKit never delivers mouseMoved, so the proximity
         // handles would never appear.
         window?.acceptsMouseMovedEvents = true
+        startFakeProgress()
     }
 
     private var hoverTracking: NSTrackingArea?
