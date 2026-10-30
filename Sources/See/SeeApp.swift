@@ -805,7 +805,7 @@ private final class OverlayModel: ObservableObject {
         struct Placement { let index: Int; let frame: CGRect }
 
         let gap: CGFloat = 18
-        let siteMin = CGSize(width: 240, height: 180)
+        let siteMin = CGSize(width: 120, height: 90)
         var items: [Item] = websites.enumerated().map {
             Item(isWidget: false, index: $0.offset, locked: $0.element.sizeLocked,
                  minSize: siteMin, natural: $0.element.size)
@@ -1058,21 +1058,21 @@ private enum NativeWidgetKind: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Deliberately marginal: below this the content would be clipped, but it is
-    /// the user's call how small a widget gets.
+    /// Deliberately marginal: half of what the content ideally needs, so the
+    /// user is free to shrink a widget far down and manage it themselves.
     var minSize: CGSize {
         switch self {
-        case .clock: CGSize(width: 130, height: 100)
-        case .calendar: CGSize(width: 170, height: 160)
-        case .note: CGSize(width: 140, height: 110)
-        case .timer: CGSize(width: 140, height: 110)
-        case .battery: CGSize(width: 130, height: 100)
-        case .system: CGSize(width: 160, height: 120)
-        case .weather: CGSize(width: 160, height: 130)
-        case .worldClock: CGSize(width: 150, height: 120)
-        case .todo: CGSize(width: 160, height: 130)
-        case .countdown: CGSize(width: 150, height: 120)
-        case .cricket: CGSize(width: 190, height: 140)
+        case .clock: CGSize(width: 70, height: 55)
+        case .calendar: CGSize(width: 90, height: 80)
+        case .note: CGSize(width: 70, height: 55)
+        case .timer: CGSize(width: 70, height: 55)
+        case .battery: CGSize(width: 65, height: 50)
+        case .system: CGSize(width: 80, height: 60)
+        case .weather: CGSize(width: 80, height: 65)
+        case .worldClock: CGSize(width: 75, height: 60)
+        case .todo: CGSize(width: 80, height: 65)
+        case .countdown: CGSize(width: 75, height: 60)
+        case .cricket: CGSize(width: 95, height: 70)
         }
     }
 
@@ -4504,7 +4504,6 @@ private struct CricketView: View {
     @StateObject private var store = CricketStore()
 
     private var matches: [CricketStore.Match] { store.matches }
-
     private var index: Int {
         guard !matches.isEmpty else { return 0 }
         return min(max(0, Int(widget.note) ?? 0), matches.count - 1)
@@ -4512,52 +4511,7 @@ private struct CricketView: View {
 
     var body: some View {
         Group {
-            if let match = matches.isEmpty ? nil : matches[index] {
-                VStack(alignment: .leading, spacing: 7) {
-                    HStack(spacing: 6) {
-                        Text(match.league.uppercased())
-                            .font(.system(size: 9, weight: .semibold)).tracking(0.8)
-                            .foregroundStyle(ink.opacity(0.38))
-                            .lineLimit(1)
-                        Spacer(minLength: 0)
-                        if matches.count > 1 {
-                            HStack(spacing: 2) {
-                                Button { widget.note = String((index + matches.count - 1) % matches.count) } label: {
-                                    Image(systemName: "chevron.left").font(.system(size: 9, weight: .bold))
-                                        .foregroundStyle(ink.opacity(0.4))
-                                        .frame(width: 16, height: 16).contentShape(Rectangle())
-                                }.buttonStyle(.plain)
-                                Button { widget.note = String((index + 1) % matches.count) } label: {
-                                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold))
-                                        .foregroundStyle(ink.opacity(0.4))
-                                        .frame(width: 16, height: 16).contentShape(Rectangle())
-                                }.buttonStyle(.plain)
-                            }
-                        }
-                    }
-                    ForEach(match.rows, id: \.name) { row in
-                        HStack(alignment: .firstTextBaseline, spacing: 6) {
-                            Text(row.name)
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(ink.opacity(0.9))
-                                .frame(width: 42, alignment: .leading)
-                            Text(row.score)
-                                .font(.system(size: 13, weight: row.batting ? .semibold : .regular))
-                                .monospacedDigit()
-                                .foregroundStyle(row.batting ? ink : ink.opacity(0.55))
-                                .lineLimit(1).minimumScaleFactor(0.7)
-                            Spacer(minLength: 0)
-                        }
-                    }
-                    Spacer(minLength: 0)
-                    Text(match.status)
-                        .font(.system(size: 10.5, weight: .medium))
-                        .foregroundStyle(match.live ? Color(red: 0.45, green: 0.85, blue: 0.5) : ink.opacity(0.45))
-                        .lineLimit(1).minimumScaleFactor(0.7)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .task(id: match.id) { await store.start() }
-            } else {
+            if matches.isEmpty {
                 VStack(spacing: 6) {
                     Image(systemName: "figure.cricket").font(.system(size: 18, weight: .light))
                         .foregroundStyle(ink.opacity(0.4))
@@ -4567,19 +4521,74 @@ private struct CricketView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .task { await store.start() }
+            } else {
+                let match = matches[index]
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(match.league.uppercased())
+                        .font(.system(size: 9, weight: .semibold)).tracking(0.7)
+                        .foregroundStyle(ink.opacity(0.38))
+                        .lineLimit(1).minimumScaleFactor(0.7)
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(match.rows) { row in
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                Text(row.name)
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .foregroundStyle(ink.opacity(0.85))
+                                    .frame(width: 38, alignment: .leading)
+                                Text(row.score)
+                                    .font(.system(size: 12.5, weight: row.leading ? .semibold : .regular))
+                                    .monospacedDigit()
+                                    .foregroundStyle(row.leading ? ink : ink.opacity(0.55))
+                                    .lineLimit(1).minimumScaleFactor(0.6)
+                                Spacer(minLength: 0)
+                            }
+                        }
+                    }
+                    Spacer(minLength: 0)
+                    HStack(spacing: 6) {
+                        Text(match.status)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(match.live ? Color(red: 0.45, green: 0.85, blue: 0.5) : ink.opacity(0.45))
+                            .lineLimit(2).minimumScaleFactor(0.65)
+                        Spacer(minLength: 0)
+                        if matches.count > 1 {
+                            // Kept away from the close badge in the top-right corner.
+                            HStack(spacing: 2) {
+                                Button { step(-1) } label: {
+                                    Image(systemName: "chevron.left").font(.system(size: 9, weight: .bold))
+                                        .foregroundStyle(ink.opacity(0.45))
+                                        .frame(width: 18, height: 18).contentShape(Rectangle())
+                                }.buttonStyle(.plain)
+                                Button { step(1) } label: {
+                                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold))
+                                        .foregroundStyle(ink.opacity(0.45))
+                                        .frame(width: 18, height: 18).contentShape(Rectangle())
+                                }.buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .task { await store.start() }
             }
         }
     }
+
+    private func step(_ delta: Int) {
+        guard !matches.isEmpty else { return }
+        widget.note = String((index + delta + matches.count) % matches.count)
+    }
 }
 
-/// Live cricket from ESPN's public scoreboards: a handful of league ids are
-/// polled together and the first live match wins, then the next fixture.
+/// Live cricket from Cricbuzz: their live-scores page ships the whole match list
+/// as JSON inside the React payload, including per-innings scores. Only
+/// internationals and the IPL are kept.
 @MainActor
 private final class CricketStore: ObservableObject {
     struct Row: Identifiable {
         let name: String
         let score: String
-        let batting: Bool
+        let leading: Bool
         var id: String { name }
     }
     struct Match: Identifiable {
@@ -4588,20 +4597,12 @@ private final class CricketStore: ObservableObject {
         let rows: [Row]
         let status: String
         let live: Bool
-        let date: Date
     }
 
     @Published var matches: [Match] = []
     @Published var status = ""
     private var timer: Timer?
     private var loading = false
-
-    private let leagues: [(String, String)] = [
-        ("8048", "IPL"), ("8039", "World Cup"), ("8038", "WC Qualifier"),
-        ("8040", "T20 WC Qualifier"), ("8037", "Champions Trophy"),
-        ("8050", "Ranji Trophy"), ("8043", "Sheffield Shield"),
-        ("8044", "Big Bash"), ("8052", "County")
-    ]
 
     func start() async {
         guard timer == nil else { return }
@@ -4615,58 +4616,134 @@ private final class CricketStore: ObservableObject {
         guard !loading else { return }
         loading = true
         defer { loading = false }
-
-        var found: [Match] = []
-        await withTaskGroup(of: Match?.self) { group in
-            for (id, name) in leagues {
-                group.addTask { await CricketStore.fetch(league: id, name: name) }
-            }
-            for await match in group {
-                if let match { found.append(match) }
-            }
-        }
-        found.sort { a, b in
-            if a.live != b.live { return a.live }
-            return a.date < b.date
-        }
-        matches = Array(found.prefix(8))
-        status = matches.isEmpty ? "No matches right now" : ""
+        let found = await CricketStore.fetch()
+        matches = found
+        status = found.isEmpty ? "No internationals on right now" : ""
     }
 
-    private static func fetch(league id: String, name: String) async -> Match? {
-        guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/cricket/\(id)/scoreboard") else { return nil }
+    private static let keptFormats: Set<String> = ["TEST", "ODI", "T20"]
+
+    private static func fetch() async -> [Match] {
+        guard let url = URL(string: "https://www.cricbuzz.com/cricket-match/live-scores") else { return [] }
         var request = URLRequest(url: url)
-        request.timeoutInterval = 10
+        request.timeoutInterval = 15
+        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15",
+                         forHTTPHeaderField: "User-Agent")
         guard let data = try? await URLSession.shared.data(for: request).0,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let events = json["events"] as? [[String: Any]],
-              let event = events.first,
-              let competitions = event["competitions"] as? [[String: Any]],
-              let competition = competitions.first else { return nil }
-
-        let state = ((event["status"] as? [String: Any])?["type"] as? [String: Any])?["state"] as? String ?? "pre"
-        let summary = (event["status"] as? [String: Any])?["summary"] as? String ?? ""
-        let dateString = event["date"] as? String ?? ""
-        let date = ISO8601DateFormatter().date(from: dateString) ?? Date()
-
-        var rows: [Row] = []
-        for competitor in (competition["competitors"] as? [[String: Any]]) ?? [] {
-            let team = competitor["team"] as? [String: Any]
-            let short = (team?["abbreviation"] as? String)
-                ?? (team?["shortDisplayName"] as? String)
-                ?? (team?["displayName"] as? String) ?? "—"
-            let score = (competitor["score"] as? String) ?? ""
-            let batting = (competitor["winner"] as? Bool) ?? false
-            rows.append(Row(name: short, score: score.isEmpty ? "—" : score, batting: batting))
+              let html = String(data: data, encoding: .utf8),
+              let payload = reactPayload(from: html),
+              let matchesJSON = array(named: "matches", in: payload),
+              let list = try? JSONSerialization.jsonObject(with: Data(matchesJSON.utf8)) as? [[String: Any]] else {
+            return []
         }
-        guard !rows.isEmpty else { return nil }
 
-        let leagueName = ((json["leagues"] as? [[String: Any]])?.first?["abbreviation"] as? String)
-            ?? ((json["leagues"] as? [[String: Any]])?.first?["name"] as? String) ?? name
-        let status = summary.isEmpty ? (state == "in" ? "Live" : "") : summary
-        return Match(id: event["id"] as? String ?? UUID().uuidString,
-                     league: leagueName, rows: rows, status: status,
-                     live: state == "in", date: date)
+        var result: [Match] = []
+        for entry in list {
+            guard let match = entry["match"] as? [String: Any],
+                  let info = match["matchInfo"] as? [String: Any] else { continue }
+            let format = info["matchFormat"] as? String ?? ""
+            let series = info["seriesName"] as? String ?? ""
+            let isIPL = series.localizedCaseInsensitiveContains("Indian Premier League")
+            guard keptFormats.contains(format) || isIPL else { continue }
+            // Only senior internationals (and the IPL): no A tours, U19, unofficial.
+            let lower = series.lowercased()
+            if lower.contains(" a tour") || lower.contains("unofficial") || lower.contains("u19")
+                || lower.contains("emerging") { continue }
+
+            let state = info["state"] as? String ?? ""
+            let live = ["In Progress", "Stumps", "Innings Break", "Rain Delay", "Delay", "Tea", "Lunch"]
+                .contains { state.localizedCaseInsensitiveContains($0) }
+            let done = state.localizedCaseInsensitiveContains("Complete")
+            if done {
+                let started = (info["startDate"] as? Double ?? 0) / 1000
+                // Recently completed only.
+                guard started > Date().timeIntervalSince1970 - 3 * 86_400 else { continue }
+            }
+
+            let score = (match["matchScore"] as? [String: Any]) ?? [:]
+            let battingTeam = info["currBatTeamId"] as? Int
+            let team1 = info["team1"] as? [String: Any] ?? [:]
+            let team2 = info["team2"] as? [String: Any] ?? [:]
+
+            func rows(_ team: [String: Any], _ key: String) -> Row? {
+                let name = (team["teamSName"] as? String) ?? (team["teamName"] as? String) ?? "—"
+                guard let dict = score[key] as? [String: Any] else {
+                    return Row(name: name, score: "", leading: false)
+                }
+                let innings = dict.keys.filter { $0.hasPrefix("inngs") }.sorted()
+                var parts: [String] = []
+                for (position, key) in innings.enumerated() {
+                    guard let inn = dict[key] as? [String: Any],
+                          let runs = inn["runs"] as? Int else { continue }
+                    let wickets = (inn["wickets"] as? Int) ?? 0
+                    var text = wickets >= 10 ? "\(runs)" : "\(runs)/\(wickets)"
+                    if innings.count == 1, let overs = inn["overs"] as? Double {
+                        text += " (\(overs) ov)"
+                    }
+                    if position == innings.count - 1, innings.count > 1, wickets < 10,
+                       let overs = inn["overs"] as? Double {
+                        text += " (" + String(overs) + ")"
+                    }
+                    parts.append(text)
+                }
+                let isBatting = (team["teamId"] as? Int) == battingTeam && live
+                return Row(name: name, score: parts.joined(separator: " & "), leading: isBatting)
+            }
+
+            let teamRows = [rows(team1, "team1Score"), rows(team2, "team2Score")].compactMap { $0 }
+            guard !teamRows.isEmpty else { continue }
+            result.append(Match(id: String(info["matchId"] as? Int ?? 0),
+                                league: "\(series) · \(info["matchDesc"] as? String ?? "")",
+                                rows: teamRows,
+                                status: info["status"] as? String ?? "",
+                                live: live))
+        }
+
+        // Live first, then upcoming, then what just finished.
+        return result.sorted { a, b in
+            func rank(_ m: Match) -> Int {
+                if m.live { return 0 }
+                return m.status.lowercased().contains("won") || m.status.lowercased().contains("draw") ? 2 : 1
+            }
+            return rank(a) < rank(b)
+        }
+    }
+
+    /// The Cricbuzz page streams its React payload as `self.__next_f.push([1,"…"])`
+    /// chunks; joining them yields the JSON the page renders from.
+    private static func reactPayload(from html: String) -> String? {
+        let pattern = #"self\.__next_f\.push\(\[1,"((?:[^"\\]|\\.)*)"\]\)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(html.startIndex..<html.endIndex, in: html)
+        var pieces: [String] = []
+        for match in regex.matches(in: html, range: range) {
+            guard let chunkRange = Range(match.range(at: 1), in: html) else { continue }
+            let escaped = String(html[chunkRange])
+            if let decoded = try? JSONDecoder().decode(String.self, from: Data(("\"" + escaped + "\"").utf8)) {
+                pieces.append(decoded)
+            }
+        }
+        return pieces.isEmpty ? nil : pieces.joined()
+    }
+
+    /// Pulls `"matches": [ … ]` out of the payload by matching brackets.
+    private static func array(named key: String, in payload: String) -> String? {
+        guard let keyRange = payload.range(of: "\"" + key + "\":[") else { return nil }
+        let start = keyRange.upperBound
+        var depth = 1
+        var index = start
+        while index < payload.endIndex {
+            let char = payload[index]
+            if char == "[" { depth += 1 }
+            if char == "]" {
+                depth -= 1
+                if depth == 0 {
+                    return "[\(payload[start..<index])]"
+                }
+            }
+            index = payload.index(after: index)
+        }
+        return nil
     }
 }
 
@@ -4855,11 +4932,22 @@ private struct WorldClockView: View {
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             VStack(alignment: .leading, spacing: 6) {
+                Text(selected.0)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(ink.opacity(0.62))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Text(timeString(context.date))
+                    .font(.system(size: 40, weight: .light))
+                    .monospacedDigit()
+                    .tracking(-1)
+                    .foregroundStyle(ink)
                 HStack {
-                    Text(selected.0)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(ink.opacity(0.62))
-                    Spacer()
+                    Text(dayString(context.date))
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(ink.opacity(0.38))
+                    Spacer(minLength: 0)
+                    // Bottom-right, clear of the close badge.
                     Menu {
                         ForEach(zones, id: \.1) { zone in
                             Button(zone.0) { widget.note = zone.1 }
@@ -4872,15 +4960,6 @@ private struct WorldClockView: View {
                     .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
                     .frame(width: 18)
                 }
-                Spacer(minLength: 0)
-                Text(timeString(context.date))
-                    .font(.system(size: 40, weight: .light))
-                    .monospacedDigit()
-                    .tracking(-1)
-                    .foregroundStyle(ink)
-                Text(dayString(context.date))
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(ink.opacity(0.38))
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         }
