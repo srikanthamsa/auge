@@ -2949,10 +2949,14 @@ private final class PageLoadBeamView: NSView {
     private let line = CAGradientLayer()
     private let reveal = CALayer()
 
+    private enum Phase { case idle, loading, finishing }
+
     private var head: CGFloat = 0
     private var tail: CGFloat = 0
-    private var finishing = false
-    private var hideToken = 0
+    private var phase: Phase = .idle
+    private var lifecycleToken = 0
+    private var lastProgress: Double = 0
+    private var pendingFinish: DispatchWorkItem?
 
     static let core = NSColor(srgbRed: 0.118, green: 0.584, blue: 0.796, alpha: 1)   // 1E95CB
     static let light = NSColor(srgbRed: 0.384, green: 0.769, blue: 0.925, alpha: 1)  // 62C4EC
@@ -2994,31 +2998,77 @@ private final class PageLoadBeamView: NSView {
     }
     required init?(coder: NSCoder) { fatalError() }
 
+    /// WebKit flaps `isLoading` and jumps progress in big steps, so the beam
+    /// follows progress only, grows monotonically within a load, and needs a
+    /// quiet moment before it treats the load as finished. Without this the
+    /// line ran left-right-left-right and was far too fast.
     func update(progress value: Double, active: Bool) {
         guard bounds.width > 0 else { return }
+        let clamped = min(max(value, 0), 1)
+
+        switch phase {
+        case .idle:
+            // Nothing is loading and nothing may start the line but a load.
+            guard active else { return }
+            beginLoad()
+        case .finishing:
+            // A stray tick must not restart the wipe; only a fresh load can.
+            guard active, clamped < 0.5 else { return }
+            beginLoad()
+        case .loading:
+            if clamped < lastProgress - 0.25 { beginLoad() }
+        }
+
+        lastProgress = clamped
+        let target = max(2, bounds.width * CGFloat(clamped))
+        if target > head || clamped < 0.02 { head = target }
+        animateReveal(duration: 0.34)
+
         if active {
-            hideToken += 1
-            finishing = false
-            let clamped = min(max(value, 0), 1)
-            head = max(2, bounds.width * CGFloat(clamped))
-            tail = 0
-            setVisible(true, duration: 0.12)
-            animateReveal(duration: 0.30)
-        } else if !finishing {
-            finishing = true
-            head = bounds.width
-            animateReveal(duration: 0.14)
-            // The tail catches up to the head: the line is swallowed from the
-            // left, exactly like the reference.
-            let token = hideToken
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
-                guard let self, token == self.hideToken else { return }
-                self.tail = self.bounds.width
-                self.animateReveal(duration: 0.26)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.26) { [weak self] in
-                    guard let self, token == self.hideToken else { return }
-                    self.setVisible(false, duration: 0.10)
-                }
+            pendingFinish?.cancel()
+            pendingFinish = nil
+        } else if pendingFinish == nil {
+            // Wait for a quiet beat: isLoading drops to false between the main
+            // resource and its subresources, and every dip used to restart the
+            // completion wipe.
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, self.phase == .loading else { return }
+                self.pendingFinish = nil
+                self.finishLoad()
+            }
+            pendingFinish = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.22, execute: work)
+        }
+    }
+
+    private func beginLoad() {
+        phase = .loading
+        lifecycleToken += 1
+        lastProgress = 0
+        tail = 0
+        head = 2
+        setVisible(true, duration: 0.10)
+        animateReveal(duration: 0.12)
+    }
+
+    private func finishLoad() {
+        phase = .finishing
+        lifecycleToken += 1
+        let token = lifecycleToken
+        head = bounds.width
+        animateReveal(duration: 0.16)
+        // The tail catches up to the head: the line is swallowed from the left,
+        // exactly like the reference.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) { [weak self] in
+            guard let self, token == self.lifecycleToken else { return }
+            self.tail = self.bounds.width
+            self.animateReveal(duration: 0.30)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.30) { [weak self] in
+                guard let self, token == self.lifecycleToken else { return }
+                self.setVisible(false, duration: 0.12)
+                self.phase = .idle
+                self.tail = 0
+                self.head = 2
             }
         }
     }
@@ -3037,8 +3087,8 @@ private final class PageLoadBeamView: NSView {
         let lineY = bounds.height - lineHeight
         line.frame = CGRect(x: 0, y: lineY, width: bounds.width, height: lineHeight)
         bloom.frame = CGRect(x: 0, y: lineY - bloomHeight, width: bounds.width, height: bloomHeight)
-        if !finishing { head = min(head, bounds.width) }
-        reveal.frame = CGRect(x: tail, y: 0, width: max(0, head - tail), height: bounds.height)
+        if phase != .finishing { head = min(head, bounds.width) }
+        if phase == .idle { reveal.frame = .zero }
         CATransaction.commit()
     }
 
