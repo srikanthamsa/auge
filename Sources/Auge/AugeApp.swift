@@ -27,6 +27,31 @@ func debugLog(_ message: String) {
     }
 }
 
+// MARK: - Brand
+
+/// The icon art, loaded from the app bundle. The menu bar gets the eye as a
+/// template so macOS tints it; panels get the full squircle.
+@MainActor
+enum AppBrand {
+    private static func image(_ name: String) -> NSImage? {
+        guard let url = Bundle.main.url(forResource: name, withExtension: "png") else { return nil }
+        return NSImage(contentsOf: url)
+    }
+
+    static var icon: NSImage? {
+        image("AppIcon-1024") ?? NSImage(systemSymbolName: "eye", accessibilityDescription: "Auge")
+    }
+
+    static var menuMark: NSImage? {
+        guard let mark = image("AugeMarkTemplate") else {
+            return NSImage(systemSymbolName: "eye", accessibilityDescription: "Auge")
+        }
+        mark.isTemplate = true
+        mark.size = NSSize(width: 18, height: 18)
+        return mark
+    }
+}
+
 // MARK: - Entry point
 
 @MainActor
@@ -56,13 +81,23 @@ private final class AugeAppDelegate: NSObject, NSApplicationDelegate {
         // Destroy any ghost items left by previous launches in the same process.
         guard statusItem == nil else { return }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem?.button?.image = NSImage(systemSymbolName: "eye", accessibilityDescription: "Auge")
+        statusItem?.button?.image = AppBrand.menuMark
         statusItem?.button?.action = #selector(togglePanel)
         statusItem?.button?.target = self
         statusItem?.button?.toolTip = "AUGE — See beyond the window."
         PasskeyBridge.shared.start()
         AdBlocker.shared.prepare()
         showPanel()
+    }
+
+    @objc private func showAbout() {
+        let alert = NSAlert()
+        alert.messageText = "Auge"
+        alert.informativeText = "See beyond the window.\n\nWebsites, files and widgets in a freeform workspace."
+        if let icon = AppBrand.icon { alert.icon = icon }
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     /// An accessory app has no menu bar, so the standard text key equivalents
@@ -72,6 +107,8 @@ private final class AugeAppDelegate: NSObject, NSApplicationDelegate {
         let appItem = NSMenuItem()
         main.addItem(appItem)
         let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "About Auge", action: #selector(showAbout), keyEquivalent: "")
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit Auge", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
 
@@ -6626,7 +6663,12 @@ private struct WorkspaceOptionsOverlay: View {
         ZStack {
             Color.black.opacity(0.24).ignoresSafeArea().onTapGesture(perform: onClose)
             VStack(alignment: .leading, spacing: 16) {
-                HStack {
+                HStack(spacing: 9) {
+                    if let icon = AppBrand.icon {
+                        Image(nsImage: icon)
+                            .resizable().interpolation(.high)
+                            .frame(width: 22, height: 22)
+                    }
                     Text(title).font(.system(size: 15, weight: .semibold))
                     Spacer()
                     Button(action: onClose) { Image(systemName: "xmark").foregroundStyle(.white.opacity(0.6)) }.buttonStyle(.plain)
