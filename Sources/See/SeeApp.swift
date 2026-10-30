@@ -823,28 +823,33 @@ private final class OverlayModel: ObservableObject {
         /// the space left cannot hold it — shrinks just enough to fit, never below
         /// the minimum it needs to render. Locked surfaces never shrink; if one
         /// cannot be placed at all, the whole attempt fails and nothing moves.
-        func pack(order: [Int]) -> (placements: [Placement], shrink: CGFloat)? {
+        func pack(order: [Int], scale: CGFloat) -> (placements: [Placement], shrink: CGFloat)? {
             var free = [usable]
             var result: [Placement] = []
             var totalShrink: CGFloat = 0
 
             for i in order {
                 let item = items[i]
-                let natural = CGSize(width: min(item.natural.width, usable.width),
-                                     height: min(item.natural.height, usable.height))
+                let natural = CGSize(width: min(item.natural.width * scale, usable.width),
+                                     height: min(item.natural.height * scale, usable.height))
                 var size = item.locked
                     ? natural
                     : CGSize(width: max(item.minSize.width, natural.width),
                              height: max(item.minSize.height, natural.height))
 
+                // Best short-side fit: the tightest rectangle the surface still
+                // fits in, which keeps big holes intact for big surfaces.
                 func bestFit(for need: CGSize) -> Int? {
                     var best: Int?
-                    var bestWaste = CGFloat.greatestFiniteMagnitude
+                    var bestShort = CGFloat.greatestFiniteMagnitude
+                    var bestLong = CGFloat.greatestFiniteMagnitude
                     for (index, rect) in free.enumerated() {
                         guard rect.width >= need.width, rect.height >= need.height else { continue }
-                        let waste = (rect.width - need.width) * rect.height
-                            + (rect.height - need.height) * rect.width
-                        if waste < bestWaste { bestWaste = waste; best = index }
+                        let short = min(rect.width - need.width, rect.height - need.height)
+                        let long = max(rect.width - need.width, rect.height - need.height)
+                        if short < bestShort || (short == bestShort && long < bestLong) {
+                            bestShort = short; bestLong = long; best = index
+                        }
                     }
                     return best
                 }
@@ -901,17 +906,26 @@ private final class OverlayModel: ObservableObject {
         // Try a few natural orders and keep the one that needs the least
         // shrinking — big surfaces first, then height, then width.
         let indices = Array(items.indices)
+        func area(_ i: Int) -> CGFloat { items[i].natural.width * items[i].natural.height }
         let orders: [[Int]] = [
-            indices.sorted { items[$0].natural.width * items[$0].natural.height > items[$1].natural.width * items[$1].natural.height },
+            indices.sorted { area($0) > area($1) },
             indices.sorted { items[$0].natural.height > items[$1].natural.height },
-            indices.sorted { items[$0].natural.width > items[$1].natural.width }
+            indices.sorted { items[$0].natural.width > items[$1].natural.width },
+            indices.sorted { max(items[$0].natural.width, items[$0].natural.height)
+                          > max(items[$1].natural.width, items[$1].natural.height) }
         ]
+        // Everything at its own size first, then progressively tighter. A global
+        // scale keeps the proportions between surfaces, so the layout still reads
+        // as one composition instead of a pile of random sizes.
+        let scales: [CGFloat] = [1.0, 0.95, 0.9, 0.85, 0.8, 0.75, 0.7, 0.65, 0.6]
 
         var best: (placements: [Placement], shrink: CGFloat)?
-        for order in orders {
-            guard let attempt = pack(order: order) else { continue }
-            if best == nil || attempt.shrink < best!.shrink - 1 { best = attempt }
-            if best!.shrink < 1 { break }
+        search: for scale in scales {
+            for order in orders {
+                guard let attempt = pack(order: order, scale: scale) else { continue }
+                if best == nil || attempt.shrink < best!.shrink - 1 { best = attempt }
+                if best!.shrink < 1 { break search }
+            }
         }
 
         guard var placements = best?.placements else {
@@ -993,6 +1007,8 @@ private final class OverlayModel: ObservableObject {
 private enum NativeWidgetKind: String, CaseIterable, Identifiable {
     case clock = "Clock", calendar = "Calendar", note = "Quick Note"
     case timer = "Timer", battery = "Battery", system = "System"
+    case weather = "Weather", worldClock = "World Clock"
+    case todo = "To-Do", countdown = "Countdown"
 
     var id: String { rawValue }
 
@@ -1004,6 +1020,10 @@ private enum NativeWidgetKind: String, CaseIterable, Identifiable {
         case .timer: "timer"
         case .battery: "battery.75percent"
         case .system: "cpu"
+        case .weather: "cloud.sun"
+        case .worldClock: "globe"
+        case .todo: "checklist"
+        case .countdown: "hourglass"
         }
     }
 
@@ -1015,6 +1035,10 @@ private enum NativeWidgetKind: String, CaseIterable, Identifiable {
         case .timer: CGSize(width: 300, height: 220)
         case .battery: CGSize(width: 300, height: 200)
         case .system: CGSize(width: 340, height: 260)
+        case .weather: CGSize(width: 320, height: 240)
+        case .worldClock: CGSize(width: 300, height: 240)
+        case .todo: CGSize(width: 320, height: 280)
+        case .countdown: CGSize(width: 300, height: 220)
         }
     }
 
@@ -1027,6 +1051,10 @@ private enum NativeWidgetKind: String, CaseIterable, Identifiable {
         case .timer: CGSize(width: 210, height: 160)
         case .battery: CGSize(width: 190, height: 150)
         case .system: CGSize(width: 230, height: 170)
+        case .weather: CGSize(width: 240, height: 190)
+        case .worldClock: CGSize(width: 230, height: 180)
+        case .todo: CGSize(width: 240, height: 200)
+        case .countdown: CGSize(width: 230, height: 170)
         }
     }
 
@@ -1038,6 +1066,10 @@ private enum NativeWidgetKind: String, CaseIterable, Identifiable {
         case .timer: "Countdown"
         case .battery: "Charge and power"
         case .system: "CPU and memory"
+        case .weather: "Local forecast"
+        case .worldClock: "Time around the world"
+        case .todo: "A short checklist"
+        case .countdown: "Days until a date"
         }
     }
 }
@@ -4290,6 +4322,14 @@ private struct NativeWidgetView: View {
             BatteryView(ink: ink)
         case .system:
             SystemStatsView(ink: ink)
+        case .weather:
+            WeatherView(widget: widget, ink: ink)
+        case .worldClock:
+            WorldClockView(widget: widget, ink: ink)
+        case .todo:
+            TodoView(widget: widget, ink: ink)
+        case .countdown:
+            CountdownView(widget: widget, ink: ink)
         }
     }
 }
@@ -4424,6 +4464,370 @@ private struct BatteryView: View {
                 }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// A one-line text draft. `@State` needs the SwiftUI macro plugin, which this
+/// toolchain does not ship, so drafts live in a tiny object instead.
+@MainActor
+private final class TextDraft: ObservableObject {
+    @Published var text = ""
+}
+
+// MARK: - Weather
+
+/// Current conditions from Open-Meteo (no API key). The city is stored in the
+/// widget's note as "lat,lon,Name".
+@MainActor
+private struct WeatherView: View {
+    @ObservedObject var widget: NativeWidgetSurface
+    let ink: Color
+    @StateObject private var store = WeatherStore()
+    @FocusState private var editing: Bool
+    @StateObject private var draft = TextDraft()
+
+    private var place: (lat: Double, lon: Double, name: String)? {
+        let parts = widget.note.split(separator: ",", maxSplits: 2).map(String.init)
+        guard parts.count == 3, let lat = Double(parts[0]), let lon = Double(parts[1]) else { return nil }
+        return (lat, lon, parts[2])
+    }
+
+    var body: some View {
+        Group {
+            if let place {
+                VStack(spacing: 8) {
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Image(systemName: store.symbol)
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(ink.opacity(0.75))
+                        Text("\(store.temperature)°")
+                            .font(.system(size: 44, weight: .light))
+                            .monospacedDigit().foregroundStyle(ink)
+                    }
+                    Text(place.name)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(ink.opacity(0.62))
+                        .lineLimit(1)
+                    Text(store.summary)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(ink.opacity(0.42))
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .task(id: widget.note) { await store.load(lat: place.lat, lon: place.lon) }
+            } else {
+                VStack(spacing: 8) {
+                    Image(systemName: "cloud.sun").font(.system(size: 20, weight: .light))
+                        .foregroundStyle(ink.opacity(0.5))
+                    TextField("City", text: $draft.text)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12))
+                        .multilineTextAlignment(.center)
+                        .focused($editing)
+                        .onSubmit { Task { await search() } }
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
+                    Text("Press Return").font(.system(size: 10)).foregroundStyle(ink.opacity(0.35))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(.horizontal, 16)
+            }
+        }
+    }
+
+    private func search() async {
+        guard let hit = await WeatherStore.geocode(draft.text) else { return }
+        widget.note = "\(hit.lat),\(hit.lon),\(hit.name)"
+    }
+}
+
+@MainActor
+private final class WeatherStore: ObservableObject {
+    @Published var temperature = 0
+    @Published var code = 0
+    @Published var wind = 0
+    @Published var high = 0
+    @Published var low = 0
+    private var timer: Timer?
+    private var lastKey = ""
+
+    var symbol: String {
+        switch code {
+        case 0: "sun.max"
+        case 1, 2: "cloud.sun"
+        case 3: "cloud"
+        case 45, 48: "cloud.fog"
+        case 51...67, 80...82: "cloud.rain"
+        case 71...77, 85, 86: "cloud.snow"
+        case 95...99: "cloud.bolt.rain"
+        default: "cloud"
+        }
+    }
+
+    var summary: String {
+        "\(condition) · H \(high)°  L \(low)° · \(wind) km/h"
+    }
+
+    private var condition: String {
+        switch code {
+        case 0: "Clear"
+        case 1: "Mostly clear"
+        case 2: "Partly cloudy"
+        case 3: "Overcast"
+        case 45, 48: "Fog"
+        case 51...57: "Drizzle"
+        case 61...67: "Rain"
+        case 71...77: "Snow"
+        case 80...82: "Showers"
+        case 85, 86: "Snow showers"
+        case 95: "Thunderstorm"
+        case 96, 99: "Thunderstorm with hail"
+        default: "—"
+        }
+    }
+
+    func load(lat: Double, lon: Double) async {
+        let key = "\(lat),\(lon)"
+        if key == lastKey, timer != nil { return }
+        lastKey = key
+        await fetch(lat: lat, lon: lon)
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 900, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.fetch(lat: lat, lon: lon) }
+        }
+    }
+
+    private func fetch(lat: Double, lon: Double) async {
+        let url = "https://api.open-meteo.com/v1/forecast?latitude=\(lat)&longitude=\(lon)"
+            + "&current=temperature_2m,weather_code,wind_speed_10m"
+            + "&daily=temperature_2m_max,temperature_2m_min&forecast_days=1&timezone=auto"
+        guard let data = await WeatherStore.get(url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        if let current = json["current"] as? [String: Any] {
+            temperature = Int((current["temperature_2m"] as? Double) ?? 0)
+            code = Int((current["weather_code"] as? Double) ?? 0)
+            wind = Int((current["wind_speed_10m"] as? Double) ?? 0)
+        }
+        if let daily = json["daily"] as? [String: Any] {
+            high = Int((daily["temperature_2m_max"] as? [Double])?.first ?? 0)
+            low = Int((daily["temperature_2m_min"] as? [Double])?.first ?? 0)
+        }
+    }
+
+    static func geocode(_ name: String) async -> (lat: Double, lon: Double, name: String)? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let escaped = trimmed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let data = await get("https://geocoding-api.open-meteo.com/v1/search?name=\(escaped)&count=1&language=en&format=json"),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let results = json["results"] as? [[String: Any]],
+              let first = results.first,
+              let lat = first["latitude"] as? Double,
+              let lon = first["longitude"] as? Double,
+              let label = first["name"] as? String else { return nil }
+        let country = (first["country_code"] as? String) ?? ""
+        return (lat, lon, country.isEmpty ? label : "\(label), \(country)")
+    }
+
+    private static func get(_ url: String) async -> Data? {
+        guard let url = URL(string: url) else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 12
+        return try? await URLSession.shared.data(for: request).0
+    }
+}
+
+// MARK: - World clock
+
+@MainActor
+private struct WorldClockView: View {
+    @ObservedObject var widget: NativeWidgetSurface
+    let ink: Color
+
+    private let zones: [(String, String)] = [
+        ("San Francisco", "America/Los_Angeles"), ("New York", "America/New_York"),
+        ("London", "Europe/London"), ("Berlin", "Europe/Berlin"),
+        ("Mumbai", "Asia/Kolkata"), ("Singapore", "Asia/Singapore"),
+        ("Tokyo", "Asia/Tokyo"), ("Sydney", "Australia/Sydney")
+    ]
+
+    private var selected: (String, String) {
+        let zone = widget.note.isEmpty ? "Europe/London" : widget.note
+        return zones.first { $0.1 == zone } ?? ("London", "Europe/London")
+    }
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text(selected.0)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(ink.opacity(0.62))
+                    Spacer()
+                    Menu {
+                        ForEach(zones, id: \.1) { zone in
+                            Button(zone.0) { widget.note = zone.1 }
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .font(.system(size: 12))
+                            .foregroundStyle(ink.opacity(0.4))
+                    }
+                    .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
+                    .frame(width: 18)
+                }
+                Spacer(minLength: 0)
+                Text(timeString(context.date))
+                    .font(.system(size: 40, weight: .light))
+                    .monospacedDigit()
+                    .tracking(-1)
+                    .foregroundStyle(ink)
+                Text(dayString(context.date))
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(ink.opacity(0.38))
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        }
+    }
+
+    private func timeString(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.timeZone = TimeZone(identifier: selected.1)
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: date)
+    }
+
+    private func dayString(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.timeZone = TimeZone(identifier: selected.1)
+        formatter.dateFormat = "EEEE"
+        return formatter.string(from: date).uppercased()
+    }
+}
+
+// MARK: - To-do
+
+@MainActor
+private struct TodoView: View {
+    @ObservedObject var widget: NativeWidgetSurface
+    let ink: Color
+    @StateObject private var draft = TextDraft()
+
+    private var items: [(done: Bool, text: String)] {
+        widget.note.split(separator: "\n", omittingEmptySubsequences: false).compactMap { line in
+            guard !line.isEmpty else { return nil }
+            let done = line.hasPrefix("[x] ")
+            return (done, String(line.dropFirst(4)))
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            ForEach(Array(items.enumerated()), id: \.offset) { index, item in
+                HStack(spacing: 7) {
+                    Image(systemName: item.done ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 12))
+                        .foregroundStyle(item.done ? Color.accentColor : ink.opacity(0.45))
+                    Text(item.text)
+                        .font(.system(size: 12))
+                        .strikethrough(item.done)
+                        .foregroundStyle(ink.opacity(item.done ? 0.4 : 0.9))
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+                .onTapGesture { toggle(index) }
+            }
+            HStack(spacing: 6) {
+                Image(systemName: "plus").font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(ink.opacity(0.35))
+                TextField("New item", text: $draft.text)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .foregroundStyle(ink.opacity(0.85))
+                    .onSubmit(add)
+                }
+            .padding(.top, 2)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func add() {
+        let text = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        var lines = widget.note.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        lines.append("[ ] " + text)
+        widget.note = lines.joined(separator: "\n")
+        draft.text = ""
+    }
+
+    private func toggle(_ index: Int) {
+        var lines = widget.note.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        guard index < lines.count else { return }
+        lines[index] = lines[index].hasPrefix("[x] ")
+            ? "[ ] " + lines[index].dropFirst(4)
+            : "[x] " + lines[index].dropFirst(4)
+        widget.note = lines.joined(separator: "\n")
+    }
+}
+
+// MARK: - Countdown
+
+@MainActor
+private struct CountdownView: View {
+    @ObservedObject var widget: NativeWidgetSurface
+    let ink: Color
+    @StateObject private var draft = TextDraft()
+
+    /// Stored as "YYYY-MM-DD|Label".
+    private var target: (date: Date, label: String)? {
+        let parts = widget.note.split(separator: "|", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else { return nil }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        guard let date = formatter.date(from: parts[0]) else { return nil }
+        return (date, parts[1])
+    }
+
+    var body: some View {
+        Group {
+            if let target {
+                TimelineView(.periodic(from: .now, by: 60)) { context in
+                    let days = Calendar.current.dateComponents([.day], from: context.date, to: target.date).day ?? 0
+                    VStack(spacing: 6) {
+                        Text(days >= 0 ? "\(days)" : "—")
+                            .font(.system(size: 44, weight: .light))
+                            .monospacedDigit().foregroundStyle(ink)
+                        Text(days >= 0 ? (days == 1 ? "day to go" : "days to go") : "passed")
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .tracking(1.1)
+                            .foregroundStyle(ink.opacity(0.4))
+                        Text(target.label)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(ink.opacity(0.72))
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            } else {
+                VStack(spacing: 8) {
+                    Text("Target date")
+                        .font(.system(size: 11)).foregroundStyle(ink.opacity(0.5))
+                    TextField("YYYY-MM-DD", text: $draft.text)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12, design: .monospaced))
+                        .multilineTextAlignment(.center)
+                        .onSubmit {
+                            let value = draft.text.trimmingCharacters(in: .whitespaces)
+                            if value.count >= 10 { widget.note = value + "|" + value }
+                        }
+                        .padding(.horizontal, 8).padding(.vertical, 6)
+                        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
+                }
+                .padding(.horizontal, 16)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
     }
 }
 
