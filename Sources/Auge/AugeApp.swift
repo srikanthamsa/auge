@@ -2930,25 +2930,32 @@ private struct WebsiteView: NSViewRepresentable {
     final class Coordinator { var lastRequestID = -1 }
 }
 
-/// The loading beam: a thick band of light pinned to the card's bottom edge,
-/// thin at the tail and swelling into a bright head that runs ahead of the
-/// streak lines behind it — a bullet train seen from the side. One pass per
-/// load, red at the tail through blue to a white head.
+/// The loading line, measured off a screen recording of the reference build and
+/// copied pixel for pixel:
 ///
-/// AppKit rather than SwiftUI: overlays paint under a WKWebView.
+/// - a 1.5pt line sitting on the card's bottom edge, top row #1E95CB over a
+///   lighter #62C4EC, uniform along its length — no head, no taper;
+/// - a soft cyan bloom that rises about 12pt above the line and fades to
+///   nothing, brightest right against the line;
+/// - it grows from the card's left edge with load progress, holds between
+///   progress steps, and on completion the tail catches up to the head so the
+///   line is swallowed from the left before it disappears.
+///
+/// Drawn in AppKit because SwiftUI overlays paint under a WKWebView.
 @MainActor
 private final class PageLoadBeamView: NSView {
-    private let rail = CALayer()
     private let container = CALayer()
-    private let gradient = CAGradientLayer()
-    private let wedge = CAShapeLayer()
-    private let head = CALayer()
+    private let bloom = CAGradientLayer()
+    private let line = CAGradientLayer()
+    private let reveal = CALayer()
 
-    private var progress: Double = 0
-    private var lastProgress: Double = 0
+    private var head: CGFloat = 0
+    private var tail: CGFloat = 0
+    private var finishing = false
+    private var hideToken = 0
 
-    private static let red = NSColor(calibratedRed: 1.0, green: 0.20, blue: 0.16, alpha: 1)
-    private static let blue = NSColor(calibratedRed: 0.16, green: 0.44, blue: 1.0, alpha: 1)
+    static let core = NSColor(srgbRed: 0.118, green: 0.584, blue: 0.796, alpha: 1)   // 1E95CB
+    static let light = NSColor(srgbRed: 0.384, green: 0.769, blue: 0.925, alpha: 1)  // 62C4EC
 
     override var isFlipped: Bool { true }
 
@@ -2957,138 +2964,101 @@ private final class PageLoadBeamView: NSView {
         wantsLayer = true
         layer?.masksToBounds = false
 
-        rail.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
-        layer?.addSublayer(rail)
-
-        container.anchorPoint = CGPoint(x: 0, y: 0.5)
-        container.masksToBounds = false
-        container.transform = CATransform3DMakeScale(0.0001, 1, 1)
+        container.masksToBounds = true
         layer?.addSublayer(container)
 
-        gradient.startPoint = CGPoint(x: 0, y: 0.5)
-        gradient.endPoint = CGPoint(x: 1, y: 0.5)
-        gradient.colors = [PageLoadBeamView.red.cgColor,
-                           PageLoadBeamView.blue.cgColor,
-                           NSColor.white.cgColor]
-        gradient.locations = [0, 0.62, 1]
-        gradient.mask = wedge
-        gradient.shadowColor = NSColor.white.cgColor
-        gradient.shadowOpacity = 0.85
-        gradient.shadowOffset = .zero
-        gradient.masksToBounds = false
-        container.addSublayer(gradient)
+        bloom.startPoint = CGPoint(x: 0.5, y: 1)
+        bloom.endPoint = CGPoint(x: 0.5, y: 0)
+        // Measured off the reference: ~72% of the line colour two points above
+        // it, ~36% at five, ~12% at nine, gone by fourteen.
+        bloom.colors = [PageLoadBeamView.core.withAlphaComponent(0.86).cgColor,
+                        PageLoadBeamView.core.withAlphaComponent(0.62).cgColor,
+                        PageLoadBeamView.core.withAlphaComponent(0.34).cgColor,
+                        PageLoadBeamView.core.withAlphaComponent(0.12).cgColor,
+                        PageLoadBeamView.core.withAlphaComponent(0.0).cgColor]
+        bloom.locations = [0, 0.14, 0.34, 0.62, 1]
+        container.addSublayer(bloom)
 
-        // The head is a sibling of the scaled body so it stays round.
-        head.backgroundColor = NSColor.white.cgColor
-        head.shadowColor = NSColor.white.cgColor
-        head.shadowOpacity = 1
-        head.shadowOffset = .zero
-        head.masksToBounds = false
-        layer?.addSublayer(head)
+        line.startPoint = CGPoint(x: 0.5, y: 0)
+        line.endPoint = CGPoint(x: 0.5, y: 1)
+        line.colors = [PageLoadBeamView.core.cgColor,
+                       PageLoadBeamView.core.cgColor,
+                       PageLoadBeamView.light.cgColor]
+        line.locations = [0, 0.45, 1]
+        container.addSublayer(line)
+
+        reveal.backgroundColor = NSColor.white.cgColor
+        container.mask = reveal
 
         alphaValue = 0
     }
     required init?(coder: NSCoder) { fatalError() }
 
     func update(progress value: Double, active: Bool) {
-        let next = min(max(value, 0), 1)
-        let restarting = next < lastProgress - 0.02
-        progress = next
-        lastProgress = next
-        layoutLayers(animate: !restarting)
-        let target: CGFloat = active ? 1 : 0
+        guard bounds.width > 0 else { return }
+        if active {
+            hideToken += 1
+            finishing = false
+            let clamped = min(max(value, 0), 1)
+            head = max(2, bounds.width * CGFloat(clamped))
+            tail = 0
+            setVisible(true, duration: 0.12)
+            animateReveal(duration: 0.30)
+        } else if !finishing {
+            finishing = true
+            head = bounds.width
+            animateReveal(duration: 0.14)
+            // The tail catches up to the head: the line is swallowed from the
+            // left, exactly like the reference.
+            let token = hideToken
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+                guard let self, token == self.hideToken else { return }
+                self.tail = self.bounds.width
+                self.animateReveal(duration: 0.26)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.26) { [weak self] in
+                    guard let self, token == self.hideToken else { return }
+                    self.setVisible(false, duration: 0.10)
+                }
+            }
+        }
+    }
+
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); layoutLayers() }
+    override func layout() { super.layout(); layoutLayers() }
+
+    private var lineHeight: CGFloat { 1.5 }
+    private var bloomHeight: CGFloat { 7 }
+
+    private func layoutLayers() {
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        container.frame = bounds
+        let lineY = bounds.height - lineHeight
+        line.frame = CGRect(x: 0, y: lineY, width: bounds.width, height: lineHeight)
+        bloom.frame = CGRect(x: 0, y: lineY - bloomHeight, width: bounds.width, height: bloomHeight)
+        if !finishing { head = min(head, bounds.width) }
+        reveal.frame = CGRect(x: tail, y: 0, width: max(0, head - tail), height: bounds.height)
+        CATransaction.commit()
+    }
+
+    private func animateReveal(duration: TimeInterval) {
+        guard bounds.width > 0 else { return }
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(duration)
+        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeOut))
+        reveal.frame = CGRect(x: tail, y: 0, width: max(0, head - tail), height: bounds.height)
+        CATransaction.commit()
+    }
+
+    private func setVisible(_ visible: Bool, duration: TimeInterval) {
+        let target: CGFloat = visible ? 1 : 0
         guard abs(alphaValue - target) > 0.01 else { return }
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = active ? 0.12 : 0.34
+            context.duration = duration
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             animator().alphaValue = target
         }
-    }
-
-    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); layoutLayers(animate: false) }
-    override func layout() { super.layout(); layoutLayers(animate: false) }
-
-    private func layoutLayers(animate: Bool) {
-        guard bounds.width > 0, bounds.height > 1 else { return }
-        let width = bounds.width
-        let height = bounds.height - 1        // the band sits on the last pixel
-        let bottom = bounds.height
-
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        rail.frame = CGRect(x: 0, y: bottom - 1, width: width, height: 1)
-        CATransaction.commit()
-
-        let radius = height * 0.36
-        CATransaction.begin()
-        CATransaction.setDisableActions(!animate)
-        CATransaction.setAnimationDuration(0.32)
-        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeOut))
-        container.bounds = CGRect(x: 0, y: 0, width: width, height: height)
-        container.position = CGPoint(x: 0, y: bottom - height / 2)
-        container.transform = CATransform3DMakeScale(max(0.0001, CGFloat(progress)), 1, 1)
-        gradient.frame = CGRect(x: 0, y: 0, width: width, height: height)
-        wedge.frame = CGRect(x: 0, y: 0, width: width, height: height)
-        wedge.path = bandPath(width: width, height: height)
-        gradient.shadowRadius = height * 0.35
-
-        head.bounds = CGRect(x: 0, y: 0, width: radius * 2, height: radius * 2)
-        head.cornerRadius = radius
-        head.shadowRadius = radius * 3.0
-        head.position = CGPoint(x: CGFloat(progress) * width - radius * 0.15,
-                                y: bottom - height * 0.50)
-        CATransaction.commit()
-        startPulse()
-    }
-
-    /// Body plus two streak lines trailing behind the head.
-    private func bandPath(width: CGFloat, height: CGFloat) -> CGPath {
-        let path = CGMutablePath()
-        let top = height * 0.30          // thinnest point of the body, at the tail
-        let neck = height * 0.62         // how far the body rises before the head
-        // Body: flat along the bottom edge, swelling towards the head.
-        path.move(to: CGPoint(x: 0, y: height))
-        path.addLine(to: CGPoint(x: width, y: height))
-        path.addLine(to: CGPoint(x: width, y: height * 0.42))
-        path.addQuadCurve(to: CGPoint(x: width * 0.80, y: height * 0.16),
-                          control: CGPoint(x: width * 0.94, y: height * 0.12))
-        path.addQuadCurve(to: CGPoint(x: width * 0.45, y: neck),
-                          control: CGPoint(x: width * 0.62, y: height * 0.30))
-        path.addLine(to: CGPoint(x: 0, y: top))
-        path.closeSubpath()
-
-        // Streaks: thin lines above the body that fade towards the tail.
-        func streak(from: CGFloat, to: CGFloat, y: CGFloat, thickness: CGFloat) {
-            let sub = CGMutablePath()
-            sub.move(to: CGPoint(x: width * from, y: y))
-            sub.addLine(to: CGPoint(x: width * to, y: y))
-            sub.addLine(to: CGPoint(x: width * to, y: y + thickness))
-            sub.addLine(to: CGPoint(x: width * from, y: y + thickness * 0.45))
-            sub.closeSubpath()
-            path.addPath(sub)
-        }
-        streak(from: 0.16, to: 0.86, y: height * 0.24, thickness: max(1.4, height * 0.10))
-        streak(from: 0.34, to: 0.90, y: height * 0.06, thickness: max(1.1, height * 0.07))
-        return path
-    }
-
-    private func startPulse() {
-        guard head.animation(forKey: "pulse") == nil else { return }
-        let pulse = CABasicAnimation(keyPath: "opacity")
-        pulse.fromValue = 0.55
-        pulse.toValue = 1.0
-        pulse.duration = 0.42
-        pulse.autoreverses = true
-        pulse.repeatCount = .infinity
-        pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        head.add(pulse, forKey: "pulse")
-        let breathe = CABasicAnimation(keyPath: "transform.scale")
-        breathe.fromValue = 0.88
-        breathe.toValue = 1.08
-        breathe.duration = 0.42
-        breathe.autoreverses = true
-        breathe.repeatCount = .infinity
-        head.add(breathe, forKey: "breathe")
     }
 }
 
@@ -3130,6 +3100,7 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
         webView.addObserver(self, forKeyPath: #keyPath(WKWebView.estimatedProgress), options: [.new], context: nil)
         webView.addObserver(self, forKeyPath: #keyPath(WKWebView.isLoading), options: [.new], context: nil)
         beam.autoresizingMask = [.width, .minYMargin]
+        startFakeProgress()
         addSubview(webView)
         addSubview(beam)
         addSubview(handles, positioned: .above, relativeTo: beam)
@@ -3154,6 +3125,22 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
             super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
         }
     }
+
+    /// Temporary harness: AUGE_FAKE_PROGRESS=1 drives the loader at a known pace
+    /// so the animation can be compared frame by frame against a reference.
+    func startFakeProgress() {
+        guard ProcessInfo.processInfo.environment["AUGE_FAKE_PROGRESS"] != nil else { return }
+        fakeStart = Date()
+        Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let started = self.fakeStart else { return }
+                let p = min(1, Date().timeIntervalSince(started) / 3.0)
+                self.beam.update(progress: p, active: p < 1)
+            }
+        }
+    }
+
+    private var fakeStart: Date?
 
     func stopObservingProgress() {
         webView.removeObserver(self, forKeyPath: #keyPath(WKWebView.estimatedProgress))
@@ -3343,7 +3330,7 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
 
     override func layout() {
         super.layout(); webView.frame = bounds; handles.frame = bounds; handles.needsDisplay = true
-        let beamHeight = min(30, max(18, bounds.height * 0.035))
+        let beamHeight: CGFloat = 18
         beam.frame = CGRect(x: 0, y: bounds.height - beamHeight, width: bounds.width, height: beamHeight)
     }
 
