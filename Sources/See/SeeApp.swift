@@ -798,17 +798,18 @@ private final class OverlayModel: ObservableObject {
             let isWidget: Bool
             let index: Int
             let locked: Bool
+            let minSize: CGSize
             var size: CGSize
-            var center: CGPoint
         }
 
+        let siteMin = CGSize(width: 360, height: 300)
         var items: [Item] = websites.enumerated().map {
             Item(isWidget: false, index: $0.offset, locked: $0.element.sizeLocked,
-                 size: $0.element.size, center: .zero)
+                 minSize: siteMin, size: $0.element.size)
         }
         items += widgets.enumerated().map {
             Item(isWidget: true, index: $0.offset, locked: $0.element.sizeLocked,
-                 size: $0.element.size, center: .zero)
+                 minSize: $0.element.kind.minSize, size: $0.element.size)
         }
         guard !items.isEmpty else { return }
 
@@ -817,105 +818,102 @@ private final class OverlayModel: ObservableObject {
                             width: max(240, size.width - 68),
                             height: max(240, size.height - 168))
 
-        // Fit everything into the workspace before placing it: shrink uniformly
-        // when the surfaces would not fit at their current sizes.
-        let totalArea = items.reduce(CGFloat(0)) { $0 + $1.size.width * $1.size.height }
+        // Nothing may be smaller than it can render: clamp every surface to its
+        // own minimum before anything else happens.
+        for i in items.indices {
+            items[i].size = CGSize(width: max(items[i].minSize.width, items[i].size.width),
+                                   height: max(items[i].minSize.height, items[i].size.height))
+        }
+
+        // Scale the flexible surfaces down until the whole set fits. Locked
+        // surfaces never shrink, so they may make the set impossible; the scale
+        // stops at 1 minimum so the message below is about space, not maths.
+        func totalHeight(_ scale: CGFloat) -> CGFloat {
+            var x: CGFloat = 0, y: CGFloat = 0, rowHeight: CGFloat = 0
+            for item in items {
+                let w = item.locked ? item.size.width : max(item.minSize.width, item.size.width * scale)
+                let h = item.locked ? item.size.height : max(item.minSize.height, item.size.height * scale)
+                if x > 0 && x + w > usable.width { x = 0; y += rowHeight + gap; rowHeight = 0 }
+                x += w + gap
+                rowHeight = max(rowHeight, h)
+            }
+            return y + rowHeight
+        }
+
+        // Locked sizes may make the set impossible. Rather than overlap or
+        // shrink below what a widget can render, leave the layout alone and say
+        // why — the user's arrangement is still there.
+        func widestRow() -> CGFloat {
+            items.reduce(0) { max($0, $1.locked ? $1.size.width : $1.minSize.width) }
+        }
+        let minimumHeight = totalHeight(0.2)
+        if minimumHeight > usable.height || widestRow() > usable.width {
+            showToast("Not enough room — unlock a few sizes or remove a surface")
+            debugLog("tidy skipped: needs \(Int(minimumHeight))pt, has \(Int(usable.height))pt")
+            return
+        }
+
         var scale: CGFloat = 1
-        if totalArea > usable.width * usable.height * 0.72 {
-            scale = max(0.55, sqrt(usable.width * usable.height * 0.72 / totalArea))
-        }
-        for i in items.indices where !items[i].locked {
-            items[i].size = CGSize(width: max(260, items[i].size.width * scale),
-                                   height: max(200, items[i].size.height * scale))
+        if totalHeight(1) > usable.height {
+            var low: CGFloat = 0.2, high: CGFloat = 1
+            for _ in 0..<20 {
+                let mid = (low + high) / 2
+                if totalHeight(mid) <= usable.height { low = mid } else { high = mid }
+            }
+            scale = max(0.2, low)
         }
 
-        var remaining = [usable]
-        var placed: [Int] = []
+        // Shelf packing: rows left to right, wrapping when the row is full. Two
+        // surfaces can never overlap because every slot is consumed in order.
+        var placements: [(index: Int, frame: CGRect)] = []
+        var x = usable.minX
+        var y = usable.minY
+        var rowHeight: CGFloat = 0
         var overflowed = false
-        var overflowCount = 0
 
-        // Big surfaces first: they are the ones with the fewest options.
-        let order = items.indices.sorted { a, b in
-            let sa = items[a].size.width * items[a].size.height
-            let sb = items[b].size.width * items[b].size.height
-            return sa > sb
+        for (i, item) in items.enumerated() {
+            var w = item.locked ? item.size.width : max(item.minSize.width, item.size.width * scale)
+            var h = item.locked ? item.size.height : max(item.minSize.height, item.size.height * scale)
+            // A surface wider than the workspace is unusable; cap it (only the
+            // flexible ones, a locked size is the user's decision).
+            if !item.locked && w > usable.width { w = usable.width }
+            if w > usable.width { w = usable.width; overflowed = true }
+
+            if x > usable.minX && x + w > usable.maxX {
+                x = usable.minX
+                y += rowHeight + gap
+                rowHeight = 0
+            }
+            if y + h > usable.maxY {
+                // Should not happen (the fit check above), but never leave the
+                // workspace if it does.
+                y = max(usable.minY, usable.maxY - h)
+            }
+
+            placements.append((i, CGRect(x: x, y: y, width: w, height: h)))
+            x += w + gap
+            rowHeight = max(rowHeight, h)
         }
 
-        for i in order {
-            var need = items[i].size
-            // Prefer the free rectangle with the least wasted area.
-            func score(_ r: CGRect) -> CGFloat {
-                r.width * r.height - need.width * need.height
+        // Centre the whole block when it is narrower/shorter than the usable area.
+        if style == .grid, let union = placements.map({ $0.frame }).reduce(nil, { (acc: CGRect?, frame: CGRect) in
+            acc.map { $0.union(frame) } ?? frame
+        }) {
+            let dx = max(0, (usable.width - union.width) / 2 - (union.minX - usable.minX))
+            let dy = max(0, (usable.height - union.height) / 2 - (union.minY - usable.minY))
+            placements = placements.map { entry in
+                (entry.index, entry.frame.offsetBy(dx: dx, dy: dy))
             }
-            var slot = remaining
-                .filter { $0.width >= need.width && $0.height >= need.height }
-                .min { score($0) < score($1) }
-
-            if slot == nil {
-                // Nothing fits at full size: take the largest free rectangle and
-                // shrink this surface into it, keeping its aspect ratio.
-                guard let big = remaining.max(by: { $0.width * $0.height < $1.width * $1.height }) else { continue }
-                if !items[i].locked {
-                    let fit = min(big.width / need.width, big.height / need.height)
-                    need = CGSize(width: max(200, need.width * fit), height: max(150, need.height * fit))
-                }
-                slot = big
-            }
-            guard var rect = slot else { continue }
-
-            // A locked item keeps its size, so it may not fit the biggest free
-            // rect. Park it inside the workspace anyway rather than pushing it
-            // off screen, and tell the user why the layout is tight.
-            if need.width > rect.width || need.height > rect.height {
-                overflowed = true
-                overflowCount += 1
-                let x = min(max(rect.minX, usable.minX), usable.maxX - need.width)
-                let y = min(max(rect.minY, usable.minY), usable.maxY - need.height)
-                rect = CGRect(x: x, y: y, width: max(need.width, 1), height: max(need.height, 1))
-                items[i].size = need
-                items[i].center = CGPoint(x: min(max(rect.minX + need.width / 2, usable.minX + need.width / 2),
-                                                usable.maxX - need.width / 2),
-                                          y: min(max(rect.minY + need.height / 2, usable.minY + need.height / 2),
-                                                usable.maxY - need.height / 2))
-                placed.append(i)
-                remaining.removeAll { $0 == rect }
-                continue
-            }
-
-            items[i].size = need
-            items[i].center = CGPoint(x: rect.minX + need.width / 2, y: rect.minY + need.height / 2)
-            placed.append(i)
-
-            remaining.removeAll { $0 == rect }
-            let right = CGRect(x: rect.minX + need.width + gap, y: rect.minY,
-                               width: rect.width - need.width - gap, height: need.height)
-            let below = CGRect(x: rect.minX, y: rect.minY + need.height + gap,
-                               width: rect.width, height: rect.height - need.height - gap)
-            if right.width > 180 && right.height > 140 { remaining.append(right) }
-            if below.width > 180 && below.height > 140 { remaining.append(below) }
-        }
-
-        // Centre the packed block inside the usable area.
-        if style == .grid, !placed.isEmpty {
-            let boxes = placed.map { i -> CGRect in
-                let it = items[i]
-                return CGRect(x: it.center.x - it.size.width / 2, y: it.center.y - it.size.height / 2,
-                              width: it.size.width, height: it.size.height)
-            }
-            let union = boxes.dropFirst().reduce(boxes[0]) { $0.union($1) }
-            let dx = usable.midX - union.midX
-            let dy = usable.midY - union.midY
-            for i in placed { items[i].center = CGPoint(x: items[i].center.x + dx, y: items[i].center.y + dy) }
         }
 
         if overflowed {
-            showToast("Not enough room — unlock a few widget sizes")
-            debugLog("tidy overflow with \(overflowCount) locked item(s)")
+            showToast("Not enough room — unlock a few sizes or remove a surface")
+            debugLog("tidy overflow: \(items.count) surfaces, scale \(scale)")
         }
 
-        // Apply with a small stagger so the move reads as one gesture.
-        for (step, i) in placed.enumerated() {
-            let item = items[i]
+        for (step, entry) in placements.enumerated() {
+            let item = items[entry.index]
+            let frame = entry.frame
             let delay = Double(step) * 0.04
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self else { return }
@@ -923,19 +921,19 @@ private final class OverlayModel: ObservableObject {
                     if item.isWidget {
                         guard item.index < self.widgets.count else { return }
                         let widget = self.widgets[item.index]
-                        widget.size = item.size
-                        widget.center = item.center
+                        widget.size = frame.size
+                        widget.center = CGPoint(x: frame.midX, y: frame.midY)
                     } else {
                         guard item.index < self.websites.count else { return }
                         let site = self.websites[item.index]
-                        site.size = item.size
-                        site.center = item.center
+                        site.size = frame.size
+                        site.center = CGPoint(x: frame.midX, y: frame.midY)
                     }
                     self.objectWillChange.send()
                 }
             }
         }
-        debugLog("tidy packed \(placed.count)/\(items.count) into \(usable.size), scale \(scale)")
+        debugLog("tidy placed \(placements.count) surfaces, scale \(scale), overflow \(overflowed)")
     }
 
     func addWebsiteFromPicker(_ address: String, in size: CGSize, rect: CGRect? = nil) {
@@ -998,6 +996,18 @@ private enum NativeWidgetKind: String, CaseIterable, Identifiable {
         case .timer: CGSize(width: 300, height: 220)
         case .battery: CGSize(width: 300, height: 200)
         case .system: CGSize(width: 340, height: 260)
+        }
+    }
+
+    /// Smallest size that still renders the widget's content.
+    var minSize: CGSize {
+        switch self {
+        case .clock: CGSize(width: 200, height: 160)
+        case .calendar: CGSize(width: 260, height: 250)
+        case .note: CGSize(width: 220, height: 180)
+        case .timer: CGSize(width: 210, height: 160)
+        case .battery: CGSize(width: 190, height: 150)
+        case .system: CGSize(width: 230, height: 170)
         }
     }
 
@@ -1378,76 +1388,37 @@ enum SiteCatalog {
 }
 
 private enum PageScripts {
-    /// WebKit gives a popup created by `window.open` no `window.opener`, so
-    /// OAuth popups (Google Identity, Apple) can never hand their result back.
-    /// This shim forwards the popup's opener messages to See, which re-delivers
-    /// them to the page that opened it.
-    /// Google Identity Services asks for FedCM, which an embedded WebKit view
-    /// does not have, so its button silently does nothing. Forcing the legacy
-    /// prompt path keeps sign-in inside the page.
-    static let gisFallback = #"""
+    /// Watches for clicks on third-party sign-in buttons. Some of those flows
+    /// need a browser capability an embedded WKWebView does not have (Google's
+    /// One Tap needs FedCM), so See can tell the user instead of leaving a dead
+    /// button.
+    static let authWatcher = #"""
     (function(){
-      if (window.__seeGISFallback) { return; }
-      window.__seeGISFallback = true;
-      // GIS checks that the message came from the window it opened, so keep the
-      // proxy that window.open returned.
-      var realOpen = window.open;
-      window.open = function () {
-        var opened = realOpen.apply(window, arguments);
-        try { window.__seeLastPopup = opened; } catch (e) {}
-        return opened;
-      };
-      var attempts = 0;
-      var patch = function () {
-        attempts += 1;
-        var gid = window.google && window.google.accounts && window.google.accounts.id;
-        if (gid && !gid.__seePatched) {
-          gid.__seePatched = true;
-          var init = gid.initialize;
-          gid.initialize = function (config) {
-            try {
-              config.use_fedcm_for_prompt = false;
-              // Redirect mode keeps the whole exchange in this web view: the
-              // provider navigates back with the result in the URL, so no popup
-              // window (and none of its missing opener) is involved.
-              config.ux_mode = 'redirect';
-            } catch (e) {}
-            return init.call(gid, config);
-          };
-          var prompt = gid.prompt;
-          gid.prompt = function (listener) {
-            try { return prompt.call(gid, listener); } catch (e) { return undefined; }
-          };
+      if (window.__seeAuthWatcher) { return; }
+      window.__seeAuthWatcher = true;
+      var providers = [
+        ['google', /(continue|sign ?in|sign ?up|log ?in) with google|google/i],
+        ['apple', /(continue|sign ?in|sign ?up|log ?in) with apple/i],
+        ['facebook', /(continue|sign ?in) with facebook/i],
+        ['github', /(continue|sign ?in) with github/i],
+        ['microsoft', /(continue|sign ?in) with (microsoft|outlook)/i]
+      ];
+      document.addEventListener('click', function (event) {
+        var node = event.target;
+        var text = '';
+        for (var depth = 0; depth < 5 && node; depth++) {
+          text = ((node.innerText || node.textContent || '') + ' ' + (node.getAttribute && (node.getAttribute('aria-label') || '') || '')).trim();
+          if (text.length > 1) { break; }
+          node = node.parentElement;
         }
-        if (attempts < 400 && !(gid && gid.__seePatched)) { setTimeout(patch, 100); }
-      };
-      patch();
-    })();
-    """#
-
-    /// A popup created by WebKit has no `window.opener`, so providers that post
-    /// their result back to the opener can never finish. This shim forwards the
-    /// message to See, which re-delivers it to the page that opened the popup.
-    static let popupOpenerShim = #"""
-    (function(){
-      if (window.__seeShimmed) { return; }
-      window.__seeShimmed = true;
-      var send = function (data) {
-        try {
-          window.webkit.messageHandlers.seeOpener.postMessage({ data: typeof data === 'string' ? data : JSON.stringify(data), origin: location.origin });
-        } catch (e) {}
-      };
-      try {
-        window.opener = {
-          postMessage: send,
-          closed: false,
-          focus: function () {},
-          blur: function () {},
-          close: function () {}
-        };
-      } catch (e) {}
-      var realClose = window.close;
-      window.close = function () { try { realClose.call(window); } catch (e) {} };
+        if (!text) { return; }
+        for (var i = 0; i < providers.length; i++) {
+          if (providers[i][1].test(text) && text.length < 120) {
+            try { window.webkit.messageHandlers.seeAuth.postMessage(providers[i][0]); } catch (e) {}
+            return;
+          }
+        }
+      }, true);
     })();
     """#
 
@@ -2348,11 +2319,8 @@ private final class SeeWebBridge: NSObject, WKScriptMessageHandler {
         case "seeScroll":
             if let value = message.body as? Double { site?.scrollY = value }
             else if let value = message.body as? NSNumber { site?.scrollY = value.doubleValue }
-        case "seeOpener":
-            if let body = message.body as? [String: Any],
-               let data = body["data"] as? String {
-                site?.deliverOpenerMessage(data, origin: body["origin"] as? String ?? "https://accounts.google.com")
-            }
+        case "seeAuth":
+            if let provider = message.body as? String { site?.noteAuthProvider(provider) }
         case "seeZap":
             if let body = message.body as? [String: Any],
                let items = body["items"] as? [[String: Any]] {
@@ -2428,6 +2396,8 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     @Published var z: Double = 0
     /// Tidy keeps a locked site's size; only its position may change.
     @Published var sizeLocked = false
+    /// Set when the page starts a third-party sign-in that cannot finish here.
+    @Published var authNotice: String?
     /// Elements the page itself has zapped, mirrored here for the config panel.
     @Published private(set) var zapped: [ZappedSummary] = []
     /// Cursor the page itself wants at the last probed point (`pointer`, `text`…).
@@ -2536,8 +2506,8 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         controller.removeAllUserScripts()
         // The zapper owns the "hidden elements" list in the page's own storage,
         // so it has to exist before the document paints.
-        controller.addUserScript(WKUserScript(source: PageScripts.gisFallback,
-                                              injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        controller.addUserScript(WKUserScript(source: PageScripts.authWatcher,
+                                              injectionTime: .atDocumentEnd, forMainFrameOnly: true))
         controller.addUserScript(WKUserScript(source: PageScripts.zapper,
                                               injectionTime: .atDocumentStart, forMainFrameOnly: true))
         if config.darkMode {
@@ -2702,24 +2672,18 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         webView?.evaluateJavaScript("window.__seeZapper && window.__seeZapper.zapAt(\(x), \(y));", completionHandler: nil)
     }
 
-    /// Re-delivers a popup's opener message into the page that opened it, the way
-    /// a real browser window would (same payload, same origin).
-    func deliverOpenerMessage(_ data: String, origin: String) {
-        guard let webView else { return }
-        let encoded = (try? JSONSerialization.data(withJSONObject: [data], options: []))
-            .flatMap { String(data: $0, encoding: .utf8) }
-            .map { String($0.dropFirst().dropLast()) } ?? "\"\""
-        let safeOrigin = origin.replacingOccurrences(of: "\"", with: "")
-        let js = """
-        (function(){
-          var payload = \(encoded);
-          var init = { data: payload, origin: "\(safeOrigin)", source: window.__seeLastPopup || window };
-          try { window.dispatchEvent(new MessageEvent('message', init)); } catch (e) {}
-          try { window.postMessage(payload, '*'); } catch (e) {}
-        })();
-        """
-        webView.evaluateJavaScript(js, completionHandler: nil)
-        debugLog("opener message delivered len=\(data.count) origin=\(safeOrigin) ")
+    /// A third-party sign-in button was pressed. Record it so the surface can
+    /// offer a route that actually works.
+    func noteAuthProvider(_ provider: String) {
+        let name = provider.prefix(1).uppercased() + provider.dropFirst()
+        authNotice = name
+        debugLog("auth: \(provider) sign-in pressed on \(title)")
+    }
+
+    func dismissAuthNotice() { authNotice = nil }
+
+    func openInBrowser() {
+        if let url = URL(string: address) { NSWorkspace.shared.open(url) }
     }
 
     func startZapper() { webView?.evaluateJavaScript("window.__seeZapper && window.__seeZapper.enable();", completionHandler: nil) }
@@ -2849,6 +2813,7 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
         controller.add(handler, name: "seeDebugLog")
         controller.add(handler, name: "seeCursor")
         controller.add(handler, name: "seeZap")
+        controller.add(handler, name: "seeAuth")
         configuration.userContentController = controller
         // Sign-in flows ("Continue with Google") are popups; without this the
         // button does nothing at all.
@@ -2897,7 +2862,7 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
         // Only the identity callback page is safe to drop: closing a real page
         // would break the flow the opener is still waiting on.
         let url = webView.url?.absoluteString ?? ""
-        webView.evaluateJavaScript("JSON.stringify({u: location.href, op: !!window.opener, t: (document.body?document.body.innerText.length:-1)})") { v, _ in
+        webView.evaluateJavaScript("JSON.stringify({h: location.host, p: location.pathname, o: !!window.opener, t: (document.body?document.body.innerText.length:-1)})") { v, _ in
             debugLog("popup nav -> \(String(describing: v))")
         }
         let isCallback = url.contains("gis_transform") || url.contains("oauth2") == false && url.contains("gsi")
@@ -2926,10 +2891,6 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
         dismissPopup()
         // WebKit requires the configuration it handed us: anything else breaks
         // the window relationship and `window.open` then returns null.
-        configuration.userContentController.add(WeakScriptHandler(bridge), name: "seeOpener")
-        configuration.userContentController.addUserScript(
-            WKUserScript(source: PageScripts.popupOpenerShim,
-                         injectionTime: .atDocumentStart, forMainFrameOnly: true))
         let child = WKWebView(frame: bounds, configuration: configuration)
         child.autoresizingMask = [.width, .height]
         child.customUserAgent = site.config.userAgent.string
@@ -2945,7 +2906,7 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
         addPopupCloseButton(over: child)
         installPopupEscape()
         if let url = navigationAction.request.url { child.load(URLRequest(url: url)) }
-        debugLog("popup opened \(navigationAction.request.url?.absoluteString ?? "-")")
+        debugLog("popup open host=\(navigationAction.request.url?.host ?? "-")")
         return child
     }
 
@@ -3373,7 +3334,76 @@ private struct PlacedWebsiteView: View {
 
     var body: some View {
         WebsiteSurfaceView(site: site, isFocused: isFocused, onFocus: onFocus, onClose: onClose, onPick: onPick)
+            .overlay {
+                if let provider = site.authNotice {
+                    AuthNoticeCard(provider: provider,
+                                   onEmail: { site.dismissAuthNotice() },
+                                   onBrowser: { site.openInBrowser(); site.dismissAuthNotice() },
+                                   onDismiss: { site.dismissAuthNotice() })
+                }
+            }
             .position(x: site.center.x, y: site.center.y)
+    }
+}
+
+/// Shown when a site starts a sign-in that an embedded WebKit view cannot
+/// finish (Google One Tap needs FedCM, popups have no `window.opener`).
+@MainActor
+private struct AuthNoticeCard: View {
+    let provider: String
+    let onEmail: () -> Void
+    let onBrowser: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "person.badge.key")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color(red: 1.0, green: 0.78, blue: 0.35))
+                Text("\(provider) sign-in can't finish here")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.95))
+                Spacer(minLength: 6)
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.6))
+                        .frame(width: 18, height: 18).contentShape(Rectangle())
+                }.buttonStyle(.plain)
+            }
+            Text("This provider needs a browser feature WebKit doesn't give embedded views (FedCM, or a popup that can talk back to the page). Use the site's email and password instead, or sign in in your browser.")
+                .font(.system(size: 11.5))
+                .foregroundStyle(.white.opacity(0.62))
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Button(action: onEmail) {
+                    Text("Use email")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.9))
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(.white.opacity(0.12), in: Capsule())
+                }.buttonStyle(.plain)
+                Button(action: onBrowser) {
+                    Text("Open in Browser")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(.white.opacity(0.92), in: Capsule())
+                }.buttonStyle(.plain)
+            }
+        }
+        .padding(14)
+        .frame(width: 330, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.black.opacity(0.55)))
+        }
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .strokeBorder(.white.opacity(0.10), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.45), radius: 22, y: 10)
+        .padding(18)
     }
 }
 
