@@ -805,7 +805,7 @@ private final class OverlayModel: ObservableObject {
         struct Placement { let index: Int; let frame: CGRect }
 
         let gap: CGFloat = 18
-        let siteMin = CGSize(width: 120, height: 90)
+        let siteMin = websiteMinSize
         var items: [Item] = websites.enumerated().map {
             Item(isWidget: false, index: $0.offset, locked: $0.element.sizeLocked,
                  minSize: siteMin, natural: $0.element.size)
@@ -3148,7 +3148,14 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
         var tx = Transaction(); tx.animation = nil
         withTransaction(tx) {
             if h == .move { site.center = CGPoint(x: startCenter.x + dx, y: startCenter.y + dy) }
-            else { site.size = CGSize(width: max(480, startSize.width + dx), height: max(360, startSize.height + dy)) }
+            else {
+                // Honour the real minimum: the old hard-coded 480x360 floor
+                // snapped any card already smaller than that back up, which made
+                // the corner feel dead.
+                let floor = websiteMinSize
+                site.size = CGSize(width: max(floor.width, startSize.width + dx),
+                                   height: max(floor.height, startSize.height + dy))
+            }
         }
     }
 
@@ -3163,7 +3170,7 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
     func refreshHandles() { handles.needsDisplay = true }
 
     private var moveRect: CGRect { CGRect(x: bounds.midX - 52, y: bounds.height - 22, width: 104, height: 22) }
-    private var resizeRect: CGRect { CGRect(x: bounds.width - 30, y: bounds.height - 30, width: 30, height: 30) }
+    private var resizeRect: CGRect { CGRect(x: bounds.width - 34, y: bounds.height - 34, width: 34, height: 34) }
     private var closeRect: CGRect { CGRect(x: bounds.width - 38, y: 0, width: 38, height: 38) }
 
     private var activeHandle: SurfaceHandleKind?
@@ -3223,6 +3230,9 @@ private final class WebsiteHandleView: NSView {
     }
 }
 
+
+/// Smallest a website card may be dragged (points).
+let websiteMinSize = CGSize(width: 120, height: 90)
 
 /// A real resize cursor where the OS has one; a two-way arrow otherwise.
 func seeResizeCursor() -> NSCursor {
@@ -4146,7 +4156,7 @@ private final class WidgetDragView: NSView {
         CGRect(x: bounds.midX - 52, y: bounds.height - 22, width: 104, height: 22)
     }
     private var resizeRect: CGRect {
-        CGRect(x: bounds.width - 30, y: bounds.height - 30, width: 30, height: 30)
+        CGRect(x: bounds.width - 34, y: bounds.height - 34, width: 34, height: 34)
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -4183,7 +4193,11 @@ private final class WidgetDragView: NSView {
         // Direct, unanimated model writes. Implicit springs were making the
         // widget trail the pointer and leave ghost frames behind.
         if h == .move { w.center = CGPoint(x: startCenter.x + dx, y: startCenter.y + dy) }
-        else { w.size = CGSize(width: max(190, startSize.width + dx), height: max(150, startSize.height + dy)) }
+        else {
+            let floor = w.kind.minSize
+            w.size = CGSize(width: max(floor.width, startSize.width + dx),
+                            height: max(floor.height, startSize.height + dy))
+        }
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -4525,18 +4539,18 @@ private struct CricketView: View {
                 let match = matches[index]
                 VStack(alignment: .leading, spacing: 6) {
                     Text(match.league.uppercased())
-                        .font(.system(size: 9, weight: .semibold)).tracking(0.7)
+                        .font(.system(size: 10.5, weight: .semibold)).tracking(0.6)
                         .foregroundStyle(ink.opacity(0.38))
                         .lineLimit(1).minimumScaleFactor(0.7)
                     VStack(alignment: .leading, spacing: 4) {
                         ForEach(match.rows) { row in
                             HStack(alignment: .firstTextBaseline, spacing: 6) {
                                 Text(row.name)
-                                    .font(.system(size: 11.5, weight: .semibold))
-                                    .foregroundStyle(ink.opacity(0.85))
-                                    .frame(width: 38, alignment: .leading)
+                                    .font(.system(size: 13.5, weight: .semibold))
+                                    .foregroundStyle(ink.opacity(0.9))
+                                    .frame(width: 46, alignment: .leading)
                                 Text(row.score)
-                                    .font(.system(size: 12.5, weight: row.leading ? .semibold : .regular))
+                                    .font(.system(size: 15, weight: row.leading ? .semibold : .regular))
                                     .monospacedDigit()
                                     .foregroundStyle(row.leading ? ink : ink.opacity(0.55))
                                     .lineLimit(1).minimumScaleFactor(0.6)
@@ -4547,28 +4561,37 @@ private struct CricketView: View {
                     Spacer(minLength: 0)
                     HStack(spacing: 6) {
                         Text(match.status)
-                            .font(.system(size: 10, weight: .medium))
+                            .font(.system(size: 11.5, weight: .medium))
                             .foregroundStyle(match.live ? Color(red: 0.45, green: 0.85, blue: 0.5) : ink.opacity(0.45))
                             .lineLimit(2).minimumScaleFactor(0.65)
                         Spacer(minLength: 0)
-                        if matches.count > 1 {
-                            // Kept away from the close badge in the top-right corner.
-                            HStack(spacing: 2) {
-                                Button { step(-1) } label: {
-                                    Image(systemName: "chevron.left").font(.system(size: 9, weight: .bold))
-                                        .foregroundStyle(ink.opacity(0.45))
-                                        .frame(width: 18, height: 18).contentShape(Rectangle())
-                                }.buttonStyle(.plain)
-                                Button { step(1) } label: {
-                                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold))
-                                        .foregroundStyle(ink.opacity(0.45))
-                                        .frame(width: 18, height: 18).contentShape(Rectangle())
-                                }.buttonStyle(.plain)
-                            }
-                        }
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .overlay(alignment: .leading) {
+                    if matches.count > 1 {
+                        Button { step(-1) } label: {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(ink.opacity(0.5))
+                                .frame(width: 20, height: 34)
+                                .contentShape(Rectangle())
+                        }.buttonStyle(.plain)
+                        .offset(x: -2)
+                    }
+                }
+                .overlay(alignment: .trailing) {
+                    if matches.count > 1 {
+                        Button { step(1) } label: {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(ink.opacity(0.5))
+                                .frame(width: 20, height: 34)
+                                .contentShape(Rectangle())
+                        }.buttonStyle(.plain)
+                        .offset(x: 2)
+                    }
+                }
                 .task { await store.start() }
             }
         }
@@ -4665,6 +4688,15 @@ private final class CricketStore: ObservableObject {
             let team1 = info["team1"] as? [String: Any] ?? [:]
             let team2 = info["team2"] as? [String: Any] ?? [:]
 
+            func oversText(_ value: Double) -> String {
+                let whole = floor(value)
+                let balls = Int(((value - whole) * 10).rounded())
+                // 19.6 is 19 overs and 6 balls: the over is complete, so the
+                // scorecard says 20 overs.
+                if balls >= 6 { return String(Int(whole) + 1) }
+                return String(format: "%.1f", value)
+            }
+
             func rows(_ team: [String: Any], _ key: String) -> Row? {
                 let name = (team["teamSName"] as? String) ?? (team["teamName"] as? String) ?? "—"
                 guard let dict = score[key] as? [String: Any] else {
@@ -4678,11 +4710,7 @@ private final class CricketStore: ObservableObject {
                     let wickets = (inn["wickets"] as? Int) ?? 0
                     var text = wickets >= 10 ? "\(runs)" : "\(runs)/\(wickets)"
                     if innings.count == 1, let overs = inn["overs"] as? Double {
-                        text += " (\(overs) ov)"
-                    }
-                    if position == innings.count - 1, innings.count > 1, wickets < 10,
-                       let overs = inn["overs"] as? Double {
-                        text += " (" + String(overs) + ")"
+                        text += " (" + oversText(overs) + " ov)"
                     }
                     parts.append(text)
                 }
