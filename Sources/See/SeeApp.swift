@@ -819,81 +819,102 @@ private final class OverlayModel: ObservableObject {
                             width: max(240, size.width - 68),
                             height: max(240, size.height - 168))
 
-        func sizeOf(_ item: Item, _ scale: CGFloat) -> CGSize {
-            if item.locked {
-                return CGSize(width: min(item.natural.width, usable.width),
-                              height: min(item.natural.height, usable.height))
-            }
-            return CGSize(width: max(item.minSize.width, item.natural.width * scale),
-                          height: max(item.minSize.height, item.natural.height * scale))
-        }
-
-        /// Guillotine packer: place each surface in the free rectangle that
-        /// wastes the least space, then split the rest into a right column and a
-        /// bottom band. Every slot is consumed exactly once, so surfaces can
-        /// never end up on top of each other.
-        func pack(scale: CGFloat, byHeight: Bool) -> [Placement]? {
+        /// Guillotine packer. Each surface either takes its own size, or — when
+        /// the space left cannot hold it — shrinks just enough to fit, never below
+        /// the minimum it needs to render. Locked surfaces never shrink; if one
+        /// cannot be placed at all, the whole attempt fails and nothing moves.
+        func pack(order: [Int]) -> (placements: [Placement], shrink: CGFloat)? {
             var free = [usable]
             var result: [Placement] = []
-            let order = items.indices.sorted { a, b in
-                let sa = sizeOf(items[a], scale), sb = sizeOf(items[b], scale)
-                if byHeight {
-                    if abs(sa.height - sb.height) > 1 { return sa.height > sb.height }
-                }
-                return sa.width * sa.height > sb.width * sb.height
-            }
+            var totalShrink: CGFloat = 0
 
             for i in order {
-                let need = sizeOf(items[i], scale)
-                guard need.width <= usable.width, need.height <= usable.height else { return nil }
-                var bestIndex: Int?
-                var bestScore = CGFloat.greatestFiniteMagnitude
-                for (index, rect) in free.enumerated() {
-                    guard rect.width >= need.width, rect.height >= need.height else { continue }
-                    let score = (rect.width - need.width) * rect.height
-                        + (rect.height - need.height) * rect.width
-                    if score < bestScore { bestScore = score; bestIndex = index }
+                let item = items[i]
+                let natural = CGSize(width: min(item.natural.width, usable.width),
+                                     height: min(item.natural.height, usable.height))
+                var size = item.locked
+                    ? natural
+                    : CGSize(width: max(item.minSize.width, natural.width),
+                             height: max(item.minSize.height, natural.height))
+
+                func bestFit(for need: CGSize) -> Int? {
+                    var best: Int?
+                    var bestWaste = CGFloat.greatestFiniteMagnitude
+                    for (index, rect) in free.enumerated() {
+                        guard rect.width >= need.width, rect.height >= need.height else { continue }
+                        let waste = (rect.width - need.width) * rect.height
+                            + (rect.height - need.height) * rect.width
+                        if waste < bestWaste { bestWaste = waste; best = index }
+                    }
+                    return best
                 }
-                guard let index = bestIndex else { return nil }
+
+                var slotIndex = bestFit(for: size)
+                if slotIndex == nil {
+                    guard !item.locked else { return nil }
+                    // Shrink into the roomiest rectangle that still fits the
+                    // minimum, keeping the aspect ratio.
+                    let candidates = free.enumerated()
+                        .filter { $0.element.width >= item.minSize.width && $0.element.height >= item.minSize.height }
+                        .sorted { $0.element.width * $0.element.height > $1.element.width * $1.element.height }
+                    guard let candidate = candidates.first else { return nil }
+                    let rect = candidate.element
+                    let fit = min(rect.width / size.width, rect.height / size.height)
+                    size = CGSize(width: max(item.minSize.width, min(rect.width, size.width * fit)),
+                                  height: max(item.minSize.height, min(rect.height, size.height * fit)))
+                    totalShrink += max(0, natural.width * natural.height - size.width * size.height)
+                    slotIndex = candidate.offset
+                }
+                guard let index = slotIndex else { return nil }
+
                 let slot = free.remove(at: index)
-                let frame = CGRect(x: slot.minX, y: slot.minY, width: need.width, height: need.height)
+                let frame = CGRect(x: slot.minX, y: slot.minY, width: size.width, height: size.height)
                 result.append(Placement(index: i, frame: frame))
 
-                let rightWidth = slot.width - need.width - gap
-                let bottomHeight = slot.height - need.height - gap
-                // Split along the longer remainder so the leftover stays usable.
-                if rightWidth >= 200 && bottomHeight >= 160 {
-                    let right = CGRect(x: slot.minX + need.width + gap, y: slot.minY,
-                                       width: rightWidth, height: need.height)
-                    let bottom = CGRect(x: slot.minX, y: slot.minY + need.height + gap,
-                                        width: slot.width, height: bottomHeight)
-                    free.append(right); free.append(bottom)
-                } else if rightWidth >= 200 {
-                    free.append(CGRect(x: slot.minX + need.width + gap, y: slot.minY,
-                                       width: rightWidth, height: slot.height))
-                } else if bottomHeight >= 160 {
-                    free.append(CGRect(x: slot.minX, y: slot.minY + need.height + gap,
-                                       width: slot.width, height: bottomHeight))
+                let spareW = slot.width - size.width - gap
+                let spareH = slot.height - size.height - gap
+                // Guillotine split: keep BOTH leftovers, orienting the cut along
+                // the shorter axis so neither strip becomes a useless sliver.
+                if spareW >= 190 && spareH >= 150 {
+                    if spareW < spareH {
+                        free.append(CGRect(x: slot.minX + size.width + gap, y: slot.minY,
+                                           width: spareW, height: size.height))
+                        free.append(CGRect(x: slot.minX, y: slot.minY + size.height + gap,
+                                           width: slot.width, height: spareH))
+                    } else {
+                        free.append(CGRect(x: slot.minX + size.width + gap, y: slot.minY,
+                                           width: spareW, height: slot.height))
+                        free.append(CGRect(x: slot.minX, y: slot.minY + size.height + gap,
+                                           width: size.width, height: spareH))
+                    }
+                } else if spareW >= 190 {
+                    free.append(CGRect(x: slot.minX + size.width + gap, y: slot.minY,
+                                       width: spareW, height: slot.height))
+                } else if spareH >= 150 {
+                    free.append(CGRect(x: slot.minX, y: slot.minY + size.height + gap,
+                                       width: slot.width, height: spareH))
                 }
             }
-            return result
+            return (result, totalShrink)
         }
 
-        // Fit at the surfaces' own sizes if possible; otherwise shrink gently,
-        // never below the minimum each surface needs to render its content.
-        var chosen: [Placement]?
-        var usedScale: CGFloat = 1
-        let scales: [CGFloat] = [1.0, 0.97, 0.94, 0.91, 0.88, 0.85, 0.82, 0.78, 0.74, 0.70, 0.66, 0.62, 0.58]
-        outer: for scale in scales {
-            for byHeight in [true, false] {
-                if let packed = pack(scale: scale, byHeight: byHeight) {
-                    chosen = packed; usedScale = scale
-                    break outer
-                }
-            }
+        // Try a few natural orders and keep the one that needs the least
+        // shrinking — big surfaces first, then height, then width.
+        let indices = Array(items.indices)
+        let orders: [[Int]] = [
+            indices.sorted { items[$0].natural.width * items[$0].natural.height > items[$1].natural.width * items[$1].natural.height },
+            indices.sorted { items[$0].natural.height > items[$1].natural.height },
+            indices.sorted { items[$0].natural.width > items[$1].natural.width }
+        ]
+
+        var best: (placements: [Placement], shrink: CGFloat)?
+        for order in orders {
+            guard let attempt = pack(order: order) else { continue }
+            if best == nil || attempt.shrink < best!.shrink - 1 { best = attempt }
+            if best!.shrink < 1 { break }
         }
 
-        guard var placements = chosen else {
+        guard var placements = best?.placements else {
             showToast("Not enough room — unlock a few sizes or remove a surface")
             debugLog("tidy skipped: no packing fits \(items.count) surfaces")
             return
@@ -908,8 +929,7 @@ private final class OverlayModel: ObservableObject {
             placements = placements.map { Placement(index: $0.index, frame: $0.frame.offsetBy(dx: dx, dy: dy)) }
         }
 
-        let frames = placements.map { $0.frame }
-        debugLog("tidy packed \(frames.count)/\(items.count) at scale \(usedScale)")
+        debugLog("tidy packed \(placements.count)/\(items.count) shrink=\(Int(best?.shrink ?? 0))")
 
         for (step, entry) in placements.enumerated() {
             let item = items[entry.index]
