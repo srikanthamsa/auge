@@ -50,6 +50,7 @@ private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        installMainMenu()
         // Destroy any ghost items left by previous launches in the same process.
         guard statusItem == nil else { return }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -58,6 +59,31 @@ private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
         statusItem?.button?.target = self
         statusItem?.button?.toolTip = "See — live workspace"
         showPanel()
+    }
+
+    /// An accessory app has no menu bar, so the standard text key equivalents
+    /// (⌘A, ⌘C, ⌘V, ⌘Z) never fire without an Edit menu to carry them.
+    private func installMainMenu() {
+        let main = NSMenu()
+        let appItem = NSMenuItem()
+        main.addItem(appItem)
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "Quit See", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = appMenu
+
+        let editItem = NSMenuItem()
+        main.addItem(editItem)
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = edit
+        NSApp.mainMenu = main
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -75,8 +101,15 @@ private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
         if let screen = NSScreen.main { panel.setFrame(screen.frame, display: true) }
         panel.alphaValue = 0
         panel.makeKeyAndOrderFront(nil)
+        panel.orderFrontRegardless()
         panel.makeMain()
         NSApp.activate(ignoringOtherApps: true)
+        // Activation is asynchronous; without this the first click of a peek can
+        // be spent activating the window instead of hitting a button.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak panel] in
+            NSApp.activate(ignoringOtherApps: true)
+            panel?.makeKey()
+        }
         NotificationCenter.default.post(name: .seePeekOpened, object: nil)
         if previousApp == nil { previousApp = NSWorkspace.shared.frontmostApplication }
         NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
@@ -241,6 +274,7 @@ private struct WorkspaceInteractionMonitor: NSViewRepresentable {
 
 @MainActor
 final class WorkspaceInteractionView: NSView {
+    static var monitorInstalled = false
     var onRightClick: ((CGPoint) -> Void)?
     var onDismiss: ((CGPoint) -> Void)?
     var isSurfaceAt: ((CGPoint) -> Bool)?
@@ -257,6 +291,8 @@ final class WorkspaceInteractionView: NSView {
 
     func installMonitorIfNeeded() {
         guard eventMonitor == nil, window != nil else { return }
+        guard !WorkspaceInteractionView.monitorInstalled else { return }
+        WorkspaceInteractionView.monitorInstalled = true
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDown, .leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
             guard let self else { return event }
             let belongsHere = event.window == nil || event.window === self.window
@@ -1241,13 +1277,15 @@ private enum PageScripts {
               if (style) { style.remove(); }
               return;
             }
-            if (!style) {
-              style = document.createElement('style');
-              style.id = '__see_hide';
-              style.setAttribute('data-see-managed', 'true');
-              (document.head || document.documentElement).appendChild(style);
-            }
-            if (style.textContent !== window.__seeHideCSS) { style.textContent = window.__seeHideCSS; }
+            // Replacing the sheet (rather than editing it) makes the page
+            // recompute styles: editing textContent in place was ignored by some
+            // virtualised pages until a reload.
+            if (style) { style.remove(); }
+            style = document.createElement('style');
+            style.id = '__see_hide';
+            style.setAttribute('data-see-managed', 'true');
+            style.textContent = window.__seeHideCSS;
+            (document.head || document.documentElement).appendChild(style);
           }
           ensure();
           if (!window.__seeHideObserver) {
@@ -2463,10 +2501,9 @@ private struct SeeOverlay: View {
 
                 VStack(spacing: 0) {
                     topBar(size: size)
-                    Spacer(minLength: 20)
-                    bottomBar
+                    Spacer(minLength: 0)
                 }
-                .padding(.horizontal, 28).padding(.top, 46).padding(.bottom, 24)
+                .padding(.horizontal, 24).padding(.top, 46).padding(.bottom, 24)
                 .offset(y: appeared ? 0 : -10)
                 .opacity(appeared ? 1 : 0)
                 .animation(.spring(response: 0.24, dampingFraction: 0.7).delay(0.01), value: appeared)
@@ -2750,19 +2787,20 @@ private struct SeeOverlay: View {
 
     // MARK: Top / bottom bars
 
+    private func pinToggle() {
+        if model.pinned {
+            if FnState.held {
+                model.pinned = false
+            } else {
+                onClose()
+            }
+        } else {
+            model.pinned = true
+        }
+    }
+
     private func topBar(size: CGSize) -> some View {
         HStack(spacing: 14) {
-            Image(systemName: "eye.fill")
-                .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
-                .frame(width: 34, height: 34)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(.white.opacity(0.08), lineWidth: 0.5))
-            VStack(alignment: .leading, spacing: 2) {
-                Text("SEE").font(.system(size: 12, weight: .semibold)).tracking(2.4)
-                Text("A little space for what matters")
-                    .font(.system(size: 11, weight: .regular)).foregroundStyle(.secondary)
-            }
             Spacer()
             HStack(spacing: 8) {
                 let count = model.websites.count + model.widgets.count
@@ -2770,18 +2808,7 @@ private struct SeeOverlay: View {
                     Text("\(count) \(count == 1 ? "surface" : "surfaces")")
                         .font(.system(size: 11, weight: .regular)).foregroundStyle(.tertiary)
                 }
-                Button {
-                    if model.pinned {
-                        if FnState.held {
-                            // Still holding Fn: just unpin, the release closes it.
-                            model.pinned = false
-                        } else {
-                            onClose()
-                        }
-                    } else {
-                        model.pinned = true
-                    }
-                } label: {
+                Button(action: pinToggle) {
                     Image(systemName: model.pinned ? "pin.fill" : "pin")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(model.pinned ? Color.accentColor : Color.white.opacity(0.85))
@@ -2789,6 +2816,18 @@ private struct SeeOverlay: View {
                         .background(.ultraThinMaterial, in: Circle())
                         .overlay(Circle().strokeBorder(.white.opacity(0.09), lineWidth: 0.5))
                         .contentShape(Circle())
+                        .background {
+                            GeometryReader { proxy in
+                                Color.clear
+                                    .onAppear {
+                                        MenuHover.shared.setAction("tb:pin", pinToggle)
+                                        MenuHover.shared.register("tb:pin", proxy.frame(in: .global))
+                                    }
+                                    .onChange(of: proxy.frame(in: .global)) { _, new in
+                                        MenuHover.shared.register("tb:pin", new)
+                                    }
+                            }
+                        }
                 }
                 .buttonStyle(.plain)
                 .help(model.pinned ? "Unpin — release Fn to close" : "Pin — keep open after Fn is released")
