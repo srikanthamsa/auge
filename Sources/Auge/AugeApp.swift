@@ -91,9 +91,18 @@ private final class AugeAppDelegate: NSObject, NSApplicationDelegate {
         statusItem?.button?.action = #selector(togglePanel)
         statusItem?.button?.target = self
         statusItem?.button?.toolTip = "AUGE — See beyond the window."
+        // First run: the introduction owns the screen; the workspace follows it.
+        if !OnboardingController.shared.hasCompleted {
+            OnboardingController.shared.presentIfNeeded { [weak self] in self?.showPanel() }
+            return
+        }
         PasskeyBridge.shared.start()
         AdBlocker.shared.prepare()
         showPanel()
+    }
+
+    @objc private func showIntroduction() {
+        OnboardingController.shared.present(force: true)
     }
 
     @objc private func showAbout() {
@@ -113,6 +122,7 @@ private final class AugeAppDelegate: NSObject, NSApplicationDelegate {
         let appItem = NSMenuItem()
         main.addItem(appItem)
         let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "Show Introduction", action: #selector(showIntroduction), keyEquivalent: "")
         appMenu.addItem(withTitle: "About Auge", action: #selector(showAbout), keyEquivalent: "")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit Auge", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
