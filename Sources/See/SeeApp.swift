@@ -1,4 +1,5 @@
 import AppKit
+import AuthenticationServices
 import EventKit
 import IOKit.ps
 import QuartzCore
@@ -59,6 +60,7 @@ private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
         statusItem?.button?.action = #selector(togglePanel)
         statusItem?.button?.target = self
         statusItem?.button?.toolTip = "See — live workspace"
+        PasskeyBridge.shared.start()
         showPanel()
     }
 
@@ -728,6 +730,11 @@ private final class OverlayModel: ObservableObject {
             withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
                 self.websites.insert(site, at: min(self.undoInsertIndex, self.websites.count))
             }
+            // Restored to the top of the stack: without this it came back
+            // underneath whatever had been raised since, so it looked like the
+            // undo had done nothing until the next click raised the surface.
+            self.bringToFront(site)
+            self.focusedID = site.id
         }
     }
 
@@ -746,6 +753,7 @@ private final class OverlayModel: ObservableObject {
             withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
                 self.widgets.insert(widget, at: min(self.undoInsertIndex, self.widgets.count))
             }
+            self.bringToFront(widget)
         }
     }
 
@@ -2892,24 +2900,23 @@ private struct WebsiteView: NSViewRepresentable {
     final class Coordinator { var lastRequestID = -1 }
 }
 
-/// The loading beam: a straight light that sweeps the bottom edge while a page
-/// loads. It tapers like a bullet train seen from the side — hair-thin at the
-/// tail, thickening towards a bright head with a halo — and runs red → blue →
-/// white from tail to head.
+/// The loading beam: one light that runs the length of the card's bottom edge as
+/// the page loads. Thin at the tail, thickening into a bright ray at the head,
+/// coloured red → blue → white from tail to head, and always pointing the way
+/// the load is going. It makes a single pass per load and then fades.
 ///
 /// AppKit rather than SwiftUI: overlays paint under a WKWebView, so a SwiftUI
-/// version never showed. The sweep is driven by the layer, not by progress,
-/// because WebKit reports progress in a few big steps and the beam froze.
+/// version never showed.
 @MainActor
 private final class PageLoadBeamView: NSView {
     private let rail = CALayer()
-    private let beam = CAGradientLayer()
+    private let container = CALayer()
+    private let gradient = CAGradientLayer()
     private let wedge = CAShapeLayer()
     private var progress: Double = 0
 
-    private static let red = NSColor(calibratedRed: 1.0, green: 0.23, blue: 0.19, alpha: 1)
-    private static let blue = NSColor(calibratedRed: 0.18, green: 0.42, blue: 1.0, alpha: 1)
-    private static let cyan = NSColor(calibratedRed: 0.45, green: 0.85, blue: 1.0, alpha: 1)
+    private static let red = NSColor(calibratedRed: 1.0, green: 0.21, blue: 0.17, alpha: 1)
+    private static let blue = NSColor(calibratedRed: 0.16, green: 0.44, blue: 1.0, alpha: 1)
 
     override var isFlipped: Bool { true }
 
@@ -2918,23 +2925,25 @@ private final class PageLoadBeamView: NSView {
         wantsLayer = true
         layer?.masksToBounds = false
 
-        rail.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
+        rail.backgroundColor = NSColor.white.withAlphaComponent(0.10).cgColor
         layer?.addSublayer(rail)
 
-        // The beam is a gradient clipped to a tapered wedge.
-        beam.startPoint = CGPoint(x: 0, y: 0.5)
-        beam.endPoint = CGPoint(x: 1, y: 0.5)
-        beam.colors = [PageLoadBeamView.red.cgColor,
-                       PageLoadBeamView.blue.cgColor,
-                       NSColor.white.cgColor]
-        beam.locations = [0, 0.62, 1]
-        beam.mask = wedge
-        beam.shadowColor = NSColor.white.cgColor
-        beam.shadowOpacity = 1
-        beam.shadowRadius = 7
-        beam.shadowOffset = .zero
-        beam.masksToBounds = false
-        layer?.addSublayer(beam)
+        container.anchorPoint = CGPoint(x: 0, y: 0.5)
+        container.masksToBounds = false
+        layer?.addSublayer(container)
+
+        gradient.startPoint = CGPoint(x: 0, y: 0.5)
+        gradient.endPoint = CGPoint(x: 1, y: 0.5)
+        gradient.colors = [PageLoadBeamView.red.cgColor,
+                           PageLoadBeamView.blue.cgColor,
+                           NSColor.white.cgColor]
+        gradient.locations = [0, 0.55, 1]
+        gradient.mask = wedge
+        gradient.shadowColor = NSColor.white.cgColor
+        gradient.shadowOpacity = 1
+        gradient.shadowOffset = .zero
+        gradient.masksToBounds = false
+        container.addSublayer(gradient)
 
         alphaValue = 0
     }
@@ -2942,68 +2951,67 @@ private final class PageLoadBeamView: NSView {
 
     func update(progress value: Double, active: Bool) {
         progress = min(max(value, 0), 1)
-        layoutLayers()
-        if active, beam.animation(forKey: "sweep") == nil { startSweep() }
+        layoutLayers(animate: true)
         let target: CGFloat = active ? 1 : 0
         guard abs(alphaValue - target) > 0.01 else { return }
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = active ? 0.14 : 0.30
+            context.duration = active ? 0.12 : 0.34
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             animator().alphaValue = target
         }
     }
 
-    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); layoutLayers() }
-    override func layout() { super.layout(); layoutLayers() }
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); layoutLayers(animate: false) }
+    override func layout() { super.layout(); layoutLayers(animate: false) }
 
-    private var beamWidth: CGFloat { max(110, bounds.width * 0.34) }
-    private var beamHeight: CGFloat { min(7, max(4.5, bounds.height * 0.6)) }
+    private var beamHeight: CGFloat { min(9, max(6, bounds.height * 0.75)) }
 
-    private func layoutLayers() {
+    private func layoutLayers(animate: Bool) {
         guard bounds.width > 0 else { return }
-        let lineY = bounds.height - 1.5
-        let width = beamWidth
         let height = beamHeight
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        rail.frame = CGRect(x: 0, y: lineY, width: bounds.width, height: 1)
-        beam.frame = CGRect(x: 0, y: lineY - height + 1, width: width, height: height)
-        beam.shadowRadius = height * 1.6
-        wedge.frame = CGRect(x: 0, y: 0, width: width, height: height)
-        wedge.path = taperPath(width: width, height: height)
+        let lineY = bounds.height - height / 2 - 1
+        let width = bounds.width
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        rail.frame = CGRect(x: 0, y: bounds.height - 1, width: width, height: 1)
         CATransaction.commit()
-        if alphaValue > 0, beam.animation(forKey: "sweep") == nil { startSweep() }
+
+        // The wedge is built for the full width and then squashed horizontally,
+        // so its head keeps its shape and the gradient stays red → white across
+        // whatever has been revealed so far.
+        let wedgePath = taperPath(width: width, height: height)
+        let scale = max(0.0001, CGFloat(progress))
+        CATransaction.begin()
+        CATransaction.setDisableActions(!animate)
+        CATransaction.setAnimationDuration(0.3)
+        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeOut))
+        container.bounds = CGRect(x: 0, y: 0, width: width, height: height)
+        container.position = CGPoint(x: 0, y: lineY)
+        container.transform = CATransform3DMakeScale(scale, 1, 1)
+        gradient.frame = CGRect(x: 0, y: 0, width: width, height: height)
+        wedge.frame = CGRect(x: 0, y: 0, width: width, height: height)
+        wedge.path = wedgePath
+        gradient.shadowRadius = height * 1.1
+        CATransaction.commit()
     }
 
-    /// Thin tail, thickening body, rounded head.
+    /// Hair-thin tail, body widening, rounded head.
     private func taperPath(width: CGFloat, height: CGFloat) -> CGPath {
         let mid = height / 2
-        let tailHalf: CGFloat = 0.45
-        let bodyHalf = mid * 0.52
-        let shoulder = width * 0.70
+        let tailHalf: CGFloat = 0.5
+        let bodyHalf = mid * 0.62
+        let shoulder = width * 0.72
         let path = CGMutablePath()
         path.move(to: CGPoint(x: 0, y: mid - tailHalf))
         path.addLine(to: CGPoint(x: shoulder, y: mid - bodyHalf))
         path.addQuadCurve(to: CGPoint(x: width, y: mid),
-                          control: CGPoint(x: width * 0.90, y: mid - bodyHalf * 1.5))
+                          control: CGPoint(x: width * 0.92, y: mid - bodyHalf * 1.35))
         path.addQuadCurve(to: CGPoint(x: shoulder, y: mid + bodyHalf),
-                          control: CGPoint(x: width * 0.90, y: mid + bodyHalf * 1.5))
+                          control: CGPoint(x: width * 0.92, y: mid + bodyHalf * 1.35))
         path.addLine(to: CGPoint(x: 0, y: mid + tailHalf))
         path.closeSubpath()
         return path
-    }
-
-    private func startSweep() {
-        guard bounds.width > 0 else { return }
-        let width = beamWidth
-        let animation = CABasicAnimation(keyPath: "position.x")
-        animation.fromValue = -width * 0.35
-        animation.toValue = bounds.width + width * 0.65
-        animation.duration = 1.35
-        animation.repeatCount = .infinity
-        animation.timingFunction = CAMediaTimingFunction(name: .linear)
-        animation.isRemovedOnCompletion = false
-        beam.removeAnimation(forKey: "sweep")
-        beam.add(animation, forKey: "sweep")
     }
 }
 
@@ -3686,6 +3694,39 @@ private struct PlacedWidgetView: View {
     }
 }
 
+
+// MARK: - Passkeys
+
+/// Passkeys ("Sign in with Google/Apple" with Face ID or Touch ID) only work in
+/// a WKWebView when the host app adopts the browser side of WebAuthn: WebKit
+/// hands the request to the system credential manager instead of its own
+/// sandboxed UI. Peek does this; without it every site falls back to passwords.
+@MainActor
+private final class PasskeyBridge {
+    static let shared = PasskeyBridge()
+
+    private let manager = ASAuthorizationWebBrowserPublicKeyCredentialManager()
+
+    private(set) var authorized: Bool = false
+
+    func start() {
+        let state = manager.authorizationStateForPlatformCredentials
+        debugLog("passkeys state \(state.rawValue)")
+        switch state {
+        case .authorized:
+            authorized = true
+        case .notDetermined:
+            manager.requestAuthorizationForPublicKeyCredentials { [weak self] state in
+                Task { @MainActor in
+                    self?.authorized = (state == .authorized)
+                    debugLog("passkeys requested -> \(state.rawValue)")
+                }
+            }
+        default:
+            authorized = false
+        }
+    }
+}
 
 // MARK: - Alignment guides
 
