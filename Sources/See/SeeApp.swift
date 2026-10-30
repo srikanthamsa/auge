@@ -61,6 +61,7 @@ private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
         statusItem?.button?.target = self
         statusItem?.button?.toolTip = "See — live workspace"
         PasskeyBridge.shared.start()
+        TrackerBlocker.shared.prepare()
         showPanel()
     }
 
@@ -984,7 +985,11 @@ private final class OverlayModel: ObservableObject {
         guard !value.isEmpty else { return }
         if let resolved = SiteCatalog.resolve(value) { value = resolved }
         if !value.contains("://") { value = "https://" + value }
-        guard let url = URL(string: value), ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else { return }
+        guard let url = URL(string: value) else { return }
+        let scheme = url.scheme?.lowercased() ?? ""
+        // Websites, and files: a local PDF or HTML page drops in the same way.
+        guard ["http", "https", "file"].contains(scheme) else { return }
+        guard scheme == "file" ? url.isFileURL : url.host != nil else { return }
         let center: CGPoint
         let surfaceSize: CGSize
         if let r = rect, r.width > 24, r.height > 24 {
@@ -2537,13 +2542,24 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         var candidate = address.trimmingCharacters(in: .whitespacesAndNewlines)
         if !candidate.contains("://") { candidate = "https://" + candidate }
         guard let url = URL(string: candidate), let scheme = url.scheme?.lowercased(),
-              ["http", "https"].contains(scheme), url.host != nil else { return }
+              ["http", "https", "file"].contains(scheme),
+              scheme == "file" ? url.isFileURL : url.host != nil else { return }
         address = url.absoluteString; requestedURL = url
-        title = url.host?.replacingOccurrences(of: "www.", with: "") ?? "Website"
+        title = url.host?.replacingOccurrences(of: "www.", with: "") ?? url.lastPathComponent
         requestID += 1
     }
 
     func reload() { webView?.reload() }
+
+    /// File URLs need loadFileURL: a plain request is refused by WebKit.
+    func load(into webView: WKWebView) {
+        let url = requestedURL
+        if url.isFileURL {
+            webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+        } else {
+            webView.load(URLRequest(url: url))
+        }
+    }
 
     func refreshOnPeekIfNeeded() {
         guard config.autoRefresh == AutoRefreshOption.everyPeek.rawValue else { return }
@@ -2612,6 +2628,8 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     func installUserScripts(in webView: WKWebView) {
         let controller = webView.configuration.userContentController
         controller.removeAllUserScripts()
+        controller.removeAllContentRuleLists()
+        if let list = TrackerBlocker.shared.list { controller.add(list) }
         // The zapper owns the "hidden elements" list in the page's own storage,
         // so it has to exist before the document paints.
         controller.addUserScript(WKUserScript(source: PageScripts.authWatcher,
@@ -2878,7 +2896,7 @@ private struct WebsiteView: NSViewRepresentable {
         site.webHost = host
         site.installUserScripts(in: host.webView)
         context.coordinator.lastRequestID = site.requestID
-        host.webView.load(URLRequest(url: site.requestedURL))
+        site.load(into: host.webView)
         site.applyTuning(reload: false)
         return host
     }
@@ -2894,7 +2912,7 @@ private struct WebsiteView: NSViewRepresentable {
         site.webView = host.webView
         guard context.coordinator.lastRequestID != site.requestID else { return }
         context.coordinator.lastRequestID = site.requestID
-        host.webView.load(URLRequest(url: site.requestedURL))
+        site.load(into: host.webView)
     }
 
     final class Coordinator { var lastRequestID = -1 }
@@ -3694,6 +3712,51 @@ private struct PlacedWidgetView: View {
     }
 }
 
+
+// MARK: - Tracker blocking
+
+/// Network-level blocking for the usual ad and tracker hosts, so a widget is
+/// quieter than the page the site would serve to a plain browser.
+@MainActor
+private final class TrackerBlocker {
+    static let shared = TrackerBlocker()
+
+    private(set) var list: WKContentRuleList?
+
+    private static let hosts = [
+        "doubleclick.net", "googlesyndication.com", "googleadservices.com",
+        "google-analytics.com", "googletagmanager.com", "googletagservices.com",
+        "adservice.google.com", "pagead2.googlesyndication.com",
+        "scorecardresearch.com", "quantserve.com", "moatads.com", "adnxs.com",
+        "rubiconproject.com", "pubmatic.com", "openx.net", "criteo.com",
+        "criteo.net", "taboola.com", "outbrain.com", "zedo.com",
+        "amazon-adsystem.com", "adsrvr.org", "casalemedia.com", "33across.com",
+        "hotjar.com", "mixpanel.com", "segment.io", "amplitude.com",
+        "branch.io", "appsflyer.com", "adjust.com", "ads-twitter.com",
+        "analytic.twitter.com", "tr.snapchat.com", "sc-static.net",
+        "connect.facebook.net"
+    ]
+
+    func prepare() {
+        guard list == nil else { return }
+        let rules: [[String: Any]] = Self.hosts.map { host in
+            ["trigger": ["url-filter": ".*", "if-domain": ["*" + host]],
+             "action": ["type": "block"]]
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: rules),
+              let json = String(data: data, encoding: .utf8) else { return }
+        WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "see-trackers", encodedContentRuleList: json) { [weak self] list, error in
+            guard error == nil, let list else {
+                debugLog("tracker list failed: \(error?.localizedDescription ?? "-")")
+                return
+            }
+            Task { @MainActor in
+                self?.list = list
+                debugLog("tracker list ready (\(Self.hosts.count) hosts)")
+            }
+        }
+    }
+}
 
 // MARK: - Passkeys
 
