@@ -61,7 +61,7 @@ private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
         statusItem?.button?.target = self
         statusItem?.button?.toolTip = "See — live workspace"
         PasskeyBridge.shared.start()
-        TrackerBlocker.shared.prepare()
+        AdBlocker.shared.prepare()
         showPanel()
     }
 
@@ -2629,7 +2629,7 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         let controller = webView.configuration.userContentController
         controller.removeAllUserScripts()
         controller.removeAllContentRuleLists()
-        if let list = TrackerBlocker.shared.list { controller.add(list) }
+        if let list = AdBlocker.shared.list { controller.add(list) }
         // The zapper owns the "hidden elements" list in the page's own storage,
         // so it has to exist before the document paints.
         controller.addUserScript(WKUserScript(source: PageScripts.authWatcher,
@@ -2932,6 +2932,7 @@ private final class PageLoadBeamView: NSView {
     private let gradient = CAGradientLayer()
     private let wedge = CAShapeLayer()
     private var progress: Double = 0
+    private var lastProgress: Double = 0
 
     private static let red = NSColor(calibratedRed: 1.0, green: 0.21, blue: 0.17, alpha: 1)
     private static let blue = NSColor(calibratedRed: 0.16, green: 0.44, blue: 1.0, alpha: 1)
@@ -2948,6 +2949,9 @@ private final class PageLoadBeamView: NSView {
 
         container.anchorPoint = CGPoint(x: 0, y: 0.5)
         container.masksToBounds = false
+        // Start empty: otherwise the first progress update animates the beam
+        // from full width back to the left, which read as "it starts on the right".
+        container.transform = CATransform3DMakeScale(0.0001, 1, 1)
         layer?.addSublayer(container)
 
         gradient.startPoint = CGPoint(x: 0, y: 0.5)
@@ -2968,8 +2972,13 @@ private final class PageLoadBeamView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     func update(progress value: Double, active: Bool) {
-        progress = min(max(value, 0), 1)
-        layoutLayers(animate: true)
+        let next = min(max(value, 0), 1)
+        // A new load restarts at zero: jump there instead of animating the beam
+        // backwards from where the last load finished.
+        let restarting = next < lastProgress - 0.02 || (active && progress >= 0.99)
+        progress = next
+        lastProgress = next
+        layoutLayers(animate: !restarting)
         let target: CGFloat = active ? 1 : 0
         guard abs(alphaValue - target) > 0.01 else { return }
         NSAnimationContext.runAnimationGroup { context in
@@ -2987,7 +2996,7 @@ private final class PageLoadBeamView: NSView {
     private func layoutLayers(animate: Bool) {
         guard bounds.width > 0 else { return }
         let height = beamHeight
-        let lineY = bounds.height - height / 2 - 1
+        let lineY = bounds.height - height / 2
         let width = bounds.width
 
         CATransaction.begin()
@@ -3006,6 +3015,7 @@ private final class PageLoadBeamView: NSView {
         CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeOut))
         container.bounds = CGRect(x: 0, y: 0, width: width, height: height)
         container.position = CGPoint(x: 0, y: lineY)
+        container.anchorPoint = CGPoint(x: 0, y: 0.5)
         container.transform = CATransform3DMakeScale(scale, 1, 1)
         gradient.frame = CGRect(x: 0, y: 0, width: width, height: height)
         wedge.frame = CGRect(x: 0, y: 0, width: width, height: height)
@@ -3713,48 +3723,151 @@ private struct PlacedWidgetView: View {
 }
 
 
-// MARK: - Tracker blocking
+// MARK: - Ad blocking
 
-/// Network-level blocking for the usual ad and tracker hosts, so a widget is
-/// quieter than the page the site would serve to a plain browser.
+/// Content blocking built from real filter lists (AdGuard Base's ad-server
+/// section plus EasyList's), compiled into a WKContentRuleList and cached so
+/// later launches do not wait. A small built-in list is installed immediately;
+/// the downloaded list replaces it as soon as it compiles.
 @MainActor
-private final class TrackerBlocker {
-    static let shared = TrackerBlocker()
+private final class AdBlocker: ObservableObject {
+    static let shared = AdBlocker()
 
-    private(set) var list: WKContentRuleList?
+    @Published private(set) var list: WKContentRuleList?
+    @Published private(set) var ruleCount = 0
 
-    private static let hosts = [
+    weak var model: OverlayModel?
+
+    private static let identifier = "see-adblock"
+    private static let cacheVersion = 4
+
+    /// Enough to cover the worst offenders before anything is downloaded.
+    private static let builtIn = [
         "doubleclick.net", "googlesyndication.com", "googleadservices.com",
-        "google-analytics.com", "googletagmanager.com", "googletagservices.com",
-        "adservice.google.com", "pagead2.googlesyndication.com",
+        "google-analytics.com", "googletagmanager.com", "adservice.google.com",
         "scorecardresearch.com", "quantserve.com", "moatads.com", "adnxs.com",
         "rubiconproject.com", "pubmatic.com", "openx.net", "criteo.com",
-        "criteo.net", "taboola.com", "outbrain.com", "zedo.com",
-        "amazon-adsystem.com", "adsrvr.org", "casalemedia.com", "33across.com",
-        "hotjar.com", "mixpanel.com", "segment.io", "amplitude.com",
-        "branch.io", "appsflyer.com", "adjust.com", "ads-twitter.com",
-        "analytic.twitter.com", "tr.snapchat.com", "sc-static.net",
-        "connect.facebook.net"
+        "criteo.net", "taboola.com", "outbrain.com", "amazon-adsystem.com",
+        "adsrvr.org", "casalemedia.com", "33across.com", "hotjar.com",
+        "mixpanel.com", "segment.io", "amplitude.com", "appsflyer.com",
+        "connect.facebook.net", "sc-static.net", "tr.snapchat.com"
+    ]
+
+    static let sources = [
+        "https://raw.githubusercontent.com/AdguardTeam/AdGuardFilters/master/BaseFilter/sections/adservers.txt",
+        "https://raw.githubusercontent.com/easylist/easylist/master/easylist/easylist_adservers.txt"
     ]
 
     func prepare() {
-        guard list == nil else { return }
-        let rules: [[String: Any]] = Self.hosts.map { host in
-            ["trigger": ["url-filter": ".*", "if-domain": ["*" + host]],
-             "action": ["type": "block"]]
+        if let cached = Self.cachedRuleJSON() {
+            compile(cached, note: "cached")
+        } else {
+            compile(Self.ruleJSON(for: Self.builtIn), note: "built-in")
+            Task { await refresh() }
+        }
+    }
+
+    private func refresh() async {
+        var domains = Set<String>()
+        for url in Self.sources {
+            guard let u = URL(string: url) else { continue }
+            var request = URLRequest(url: u)
+            request.timeoutInterval = 20
+            guard let (data, _) = try? await URLSession.shared.data(for: request),
+                  let text = String(data: data, encoding: .utf8) else { continue }
+            for line in text.split(separator: "\n") {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard trimmed.hasPrefix("||") else { continue }
+                var host = trimmed.dropFirst(2)
+                if let stop = host.firstIndex(where: { $0 == "^" || $0 == "$" || $0 == "/" }) {
+                    host = host[host.startIndex..<stop]
+                }
+                let domain = host.lowercased()
+                guard !domain.isEmpty, !domain.contains("*"), !domain.contains(" "),
+                      domain.contains(".") else { continue }
+                domains.insert(domain)
+            }
+        }
+        guard !domains.isEmpty else {
+            debugLog("adblock: no domains downloaded, keeping built-in")
+            return
+        }
+        let capped = Array(domains.sorted().prefix(40_000))
+        let json = Self.ruleJSON(for: capped)
+        Self.storeCache(json)
+        compile(json, note: "downloaded \(capped.count)")
+    }
+
+    private func compile(_ json: String, note: String) {
+        let started = Date()
+        WKContentRuleListStore.default().compileContentRuleList(forIdentifier: Self.identifier,
+                                                                encodedContentRuleList: json) { [weak self] list, error in
+            Task { @MainActor in
+                guard let self else { return }
+                guard error == nil, let list else {
+                    debugLog("adblock: compile failed (\(note)) \(error?.localizedDescription ?? "-")")
+                    // A cached list that no longer compiles must not block the
+                    // real download forever.
+                    if note == "cached" {
+                        Self.clearCache()
+                        Task { await self.refresh() }
+                    }
+                    return
+                }
+                self.list = list
+                self.ruleCount = json.components(separatedBy: "\"action\"").count - 1
+                debugLog(String(format: "adblock: %.1fs %@ rules=%d",
+                                Date().timeIntervalSince(started), note, self.ruleCount))
+                self.applyToLiveSurfaces()
+            }
+        }
+    }
+
+    private func applyToLiveSurfaces() {
+        guard let model, let list else { return }
+        for site in model.websites {
+            guard let controller = site.webView?.configuration.userContentController else { continue }
+            controller.removeAllContentRuleLists()
+            controller.add(list)
+        }
+    }
+
+    private static func ruleJSON(for domains: [String]) -> String {
+        let rules: [[String: Any]] = domains.map { domain in
+            let escaped = domain.replacingOccurrences(of: ".", with: "\\.")
+            // WebKit's content-blocker regex engine rejects disjunction groups
+            // (`([:/]|$)`), so the host is matched as a prefix instead.
+            return ["trigger": ["url-filter": "^[^:]+://+([^:/]+\\.)*\(escaped)"],
+                    "action": ["type": "block"]]
         }
         guard let data = try? JSONSerialization.data(withJSONObject: rules),
-              let json = String(data: data, encoding: .utf8) else { return }
-        WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "see-trackers", encodedContentRuleList: json) { [weak self] list, error in
-            guard error == nil, let list else {
-                debugLog("tracker list failed: \(error?.localizedDescription ?? "-")")
-                return
-            }
-            Task { @MainActor in
-                self?.list = list
-                debugLog("tracker list ready (\(Self.hosts.count) hosts)")
-            }
-        }
+              let json = String(data: data, encoding: .utf8) else { return "[]" }
+        return json
+    }
+
+    private static var cacheURL: URL? {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        guard let base else { return nil }
+        let dir = base.appendingPathComponent("See", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("adblock-v\(cacheVersion).json")
+    }
+
+    private static func cachedRuleJSON() -> String? {
+        guard let url = cacheURL, let data = try? Data(contentsOf: url) else { return nil }
+        let age = (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date) ?? nil
+        if let age, Date().timeIntervalSince(age) > 7 * 86_400 { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func clearCache() {
+        guard let url = cacheURL else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    private static func storeCache(_ json: String) {
+        guard let url = cacheURL else { return }
+        try? json.data(using: .utf8)?.write(to: url, options: .atomic)
     }
 }
 
@@ -4010,8 +4123,14 @@ private struct SeeOverlay: View {
                     .zIndex(100)
             }
             .frame(width: size.width, height: size.height)
-            .onAppear { AlignmentGuides.shared.model = model }
-            .onChange(of: model.websites.count) { AlignmentGuides.shared.model = model }
+            .onAppear {
+                AlignmentGuides.shared.model = model
+                AdBlocker.shared.model = model
+            }
+            .onChange(of: model.websites.count) {
+                AlignmentGuides.shared.model = model
+                AdBlocker.shared.model = model
+            }
             .background {
                 WorkspaceInteractionMonitor(
                     onRightClick: { pt in

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- WebAuthn in a WKWebView only runs for a browser app that carries this
+	     entitlement, granted by Apple to browser apps and delivered through a
+	     provisioning profile. Peek ships it. An ad-hoc signature cannot use it:
+	     launchd refuses to start the app (RBSRequestErrorDomain 5 / E163). -->
+	<key>com.apple.developer.web-browser.public-key-credential</key>
+	<true/>
+</dict>
+</plist>
