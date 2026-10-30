@@ -849,6 +849,7 @@ private final class OverlayModel: ObservableObject {
     func addWebsiteFromPicker(_ address: String, in size: CGSize, rect: CGRect? = nil) {
         var value = address.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
+        if let resolved = SiteCatalog.resolve(value) { value = resolved }
         if !value.contains("://") { value = "https://" + value }
         guard let url = URL(string: value), ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else { return }
         let center: CGPoint
@@ -1125,6 +1126,162 @@ private enum WorkspaceStore {
 }
 
 // MARK: - Injected page scripts
+
+/// A small offline catalogue so a name is enough to add a site.
+struct SiteSuggestion: Identifiable, Equatable {
+    let name: String
+    let url: String
+    var id: String { url }
+    var host: String { URL(string: url)?.host?.replacingOccurrences(of: "www.", with: "") ?? url }
+}
+
+enum SiteCatalog {
+    static let entries: [(String, String, String)] = [
+        ("YouTube", "https://www.youtube.com", "video videos music watch"),
+        ("X", "https://x.com", "twitter tweets"),
+        ("Reddit", "https://www.reddit.com", "forum communities"),
+        ("Google", "https://www.google.com", "search"),
+        ("Gmail", "https://mail.google.com", "email inbox"),
+        ("Google Calendar", "https://calendar.google.com", "schedule"),
+        ("Google Drive", "https://drive.google.com", "files docs"),
+        ("Google Docs", "https://docs.google.com", "documents writing"),
+        ("Google Sheets", "https://sheets.google.com", "spreadsheet"),
+        ("ChatGPT", "https://chat.openai.com", "openai gpt ai assistant"),
+        ("Claude", "https://claude.ai", "anthropic ai assistant"),
+        ("Perplexity", "https://www.perplexity.ai", "ai search"),
+        ("Gemini", "https://gemini.google.com", "google ai"),
+        ("GitHub", "https://github.com", "code repos git"),
+        ("GitLab", "https://gitlab.com", "code repos"),
+        ("Stack Overflow", "https://stackoverflow.com", "questions answers code"),
+        ("Hacker News", "https://news.ycombinator.com", "startups tech news"),
+        ("MDN", "https://developer.mozilla.org", "web docs javascript"),
+        ("npm", "https://www.npmjs.com", "packages javascript"),
+        ("Docker Hub", "https://hub.docker.com", "containers images"),
+        ("Vercel", "https://vercel.com", "deploy hosting"),
+        ("Netlify", "https://app.netlify.com", "deploy hosting"),
+        ("Cloudflare", "https://dash.cloudflare.com", "dns"),
+        ("Supabase", "https://supabase.com", "database postgres"),
+        ("Firebase", "https://console.firebase.google.com", "google backend"),
+        ("Hugging Face", "https://huggingface.co", "models ai datasets"),
+        ("Kaggle", "https://www.kaggle.com", "datasets ml"),
+        ("arXiv", "https://arxiv.org", "papers research"),
+        ("Notion", "https://www.notion.so", "notes wiki docs"),
+        ("Figma", "https://www.figma.com", "design"),
+        ("Linear", "https://linear.app", "issues projects"),
+        ("Slack", "https://app.slack.com", "chat team"),
+        ("Discord", "https://discord.com/app", "chat community"),
+        ("Trello", "https://trello.com", "boards"),
+        ("Asana", "https://app.asana.com", "tasks"),
+        ("Jira", "https://www.atlassian.com/software/jira", "issues agile"),
+        ("Miro", "https://miro.com", "whiteboard"),
+        ("Spotify", "https://open.spotify.com", "music podcasts"),
+        ("YouTube Music", "https://music.youtube.com", "music"),
+        ("SoundCloud", "https://soundcloud.com", "music"),
+        ("Apple Music", "https://music.apple.com", "music"),
+        ("Netflix", "https://www.netflix.com", "movies shows"),
+        ("Twitch", "https://www.twitch.tv", "streams live"),
+        ("Prime Video", "https://www.primevideo.com", "movies"),
+        ("Disney+", "https://www.disneyplus.com", "movies"),
+        ("Instagram", "https://www.instagram.com", "photos"),
+        ("TikTok", "https://www.tiktok.com", "videos short"),
+        ("LinkedIn", "https://www.linkedin.com", "jobs professional"),
+        ("Pinterest", "https://www.pinterest.com", "ideas images"),
+        ("Bluesky", "https://bsky.app", "social"),
+        ("Threads", "https://www.threads.net", "social"),
+        ("Mastodon", "https://mastodon.social", "social"),
+        ("Tumblr", "https://www.tumblr.com", "blog social"),
+        ("Medium", "https://medium.com", "articles blog"),
+        ("Substack", "https://substack.com", "newsletters"),
+        ("Dev.to", "https://dev.to", "developer articles"),
+        ("Product Hunt", "https://www.producthunt.com", "launches startups"),
+        ("Wikipedia", "https://www.wikipedia.org", "encyclopedia"),
+        ("Amazon", "https://www.amazon.com", "shopping store"),
+        ("eBay", "https://www.ebay.com", "shopping auction"),
+        ("Etsy", "https://www.etsy.com", "handmade shopping"),
+        ("Shopify", "https://admin.shopify.com", "store admin"),
+        ("Stripe", "https://dashboard.stripe.com", "payments"),
+        ("PayPal", "https://www.paypal.com", "payments"),
+        ("Booking", "https://www.booking.com", "hotels travel"),
+        ("Airbnb", "https://www.airbnb.com", "stays travel"),
+        ("Uber", "https://www.uber.com", "rides"),
+        ("Google Maps", "https://maps.google.com", "maps directions"),
+        ("IMDb", "https://www.imdb.com", "movies ratings"),
+        ("Letterboxd", "https://letterboxd.com", "films diary"),
+        ("Goodreads", "https://www.goodreads.com", "books"),
+        ("Chess.com", "https://www.chess.com", "chess"),
+        ("Lichess", "https://lichess.org", "chess"),
+        ("Pokémon Showdown", "https://play.pokemonshowdown.com", "pokemon battles simulator"),
+        ("PokeAPI", "https://pokeapi.co", "pokemon api"),
+        ("Speedtest", "https://www.speedtest.net", "internet speed"),
+        ("Weather", "https://weather.com", "forecast"),
+        ("time.is", "https://time.is", "clock time zone"),
+        ("DownDetector", "https://downdetector.com", "outage status"),
+        ("Hacker News", "https://news.ycombinator.com/newest", "new stories"),
+        ("BBC", "https://www.bbc.com", "news"),
+        ("Reuters", "https://www.reuters.com", "news"),
+        ("The Verge", "https://www.theverge.com", "tech news"),
+        ("TechCrunch", "https://techcrunch.com", "startup news"),
+        ("Bloomberg", "https://www.bloomberg.com", "markets news"),
+        ("Hacker News", "https://news.ycombinator.com", "tech"),
+        ("Dribbble", "https://dribbble.com", "design inspiration"),
+        ("Behance", "https://www.behance.net", "design portfolio"),
+        ("Unsplash", "https://unsplash.com", "photos"),
+        ("Coursera", "https://www.coursera.org", "courses"),
+        ("Udemy", "https://www.udemy.com", "courses"),
+        ("Duolingo", "https://www.duolingo.com", "languages"),
+        ("Khan Academy", "https://www.khanacademy.org", "learn"),
+        ("Gumroad", "https://gumroad.com", "sell digital"),
+        ("Cal.com", "https://app.cal.com", "scheduling"),
+        ("Calendly", "https://calendly.com", "scheduling"),
+        ("Excalidraw", "https://excalidraw.com", "diagram sketch"),
+        ("Photopea", "https://www.photopea.com", "photo editor"),
+        ("CodeSandbox", "https://codesandbox.io", "code sandbox"),
+        ("Replit", "https://replit.com", "code editor"),
+        ("Codepen", "https://codepen.io", "frontend snippets"),
+        ("Twitch", "https://www.twitch.tv/directory", "live streams")
+    ]
+
+    static func suggestions(for query: String, limit: Int = 6) -> [SiteSuggestion] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !q.isEmpty else { return [] }
+        var scored: [(Int, SiteSuggestion)] = []
+        for (name, url, keywords) in entries {
+            let n = name.lowercased()
+            let host = (URL(string: url)?.host ?? "").lowercased()
+            var score = 0
+            if n == q { score = 100 }
+            else if n.hasPrefix(q) { score = 80 }
+            else if n.contains(q) { score = 60 }
+            else if host.contains(q) { score = 50 }
+            else if keywords.split(separator: " ").contains(where: { $0.hasPrefix(q) }) { score = 40 }
+            else if q.count > 2 && keywords.contains(q) { score = 30 }
+            guard score > 0 else { continue }
+            scored.append((score, SiteSuggestion(name: name, url: url)))
+        }
+        scored.sort { $0.0 > $1.0 }
+        var seen = Set<String>()
+        return scored.compactMap { entry in
+            guard seen.insert(entry.1.url).inserted else { return nil }
+            return entry.1
+        }.prefix(limit).map { $0 }
+    }
+
+    /// Turns whatever was typed into something that opens: a catalogue entry,
+    /// a bare domain, or a web search for an unknown phrase.
+    static func resolve(_ input: String) -> String? {
+        let raw = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return nil }
+        if let best = suggestions(for: raw, limit: 1).first, best.name.lowercased().hasPrefix(raw.lowercased()) {
+            return best.url
+        }
+        if raw.contains(".") && !raw.contains(" ") {
+            return raw.contains("://") ? raw : "https://" + raw
+        }
+        if let best = suggestions(for: raw, limit: 1).first { return best.url }
+        let query = raw.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? raw
+        return "https://duckduckgo.com/?q=" + query
+    }
+}
 
 private enum PageScripts {
     static let scrollReporter = """
@@ -2492,13 +2649,20 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         guard navigationAction.targetFrame == nil else { return nil }
+        dismissPopup()
         let child = WKWebView(frame: bounds, configuration: configuration)
         child.autoresizingMask = [.width, .height]
         child.customUserAgent = site.config.userAgent.string
         child.navigationDelegate = self
         child.uiDelegate = self
+        // A failed sign-in leaves a blank white sheet over the page unless the
+        // popup paints like the rest of See.
+        child.setValue(true, forKey: "drawsBackground")
+        child.underPageBackgroundColor = NSColor(calibratedRed: 0.086, green: 0.090, blue: 0.098, alpha: 1)
+        child.layer?.backgroundColor = NSColor(calibratedRed: 0.086, green: 0.090, blue: 0.098, alpha: 1).cgColor
         addSubview(child, positioned: .below, relativeTo: handles)
         popup = child
+        addPopupCloseButton(over: child)
         if let url = navigationAction.request.url { child.load(URLRequest(url: url)) }
         debugLog("popup opened \(navigationAction.request.url?.absoluteString ?? "-")")
         return child
@@ -2506,9 +2670,33 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
 
     func webViewDidClose(_ webView: WKWebView) {
         guard webView !== self.webView else { return }
-        webView.removeFromSuperview()
-        if popup === webView { popup = nil }
+        dismissPopup()
         debugLog("popup closed")
+    }
+
+    private var popupCloseButton: NSButton?
+
+    private func addPopupCloseButton(over child: WKWebView) {
+        popupCloseButton?.removeFromSuperview()
+        let button = NSButton(title: "", target: nil, action: nil)
+        button.isBordered = false
+        button.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Close")
+        button.contentTintColor = .white.withAlphaComponent(0.8)
+        button.frame = NSRect(x: bounds.width - 34, y: bounds.height - 34, width: 24, height: 24)
+        button.autoresizingMask = [.minXMargin, .minYMargin]
+        button.target = self
+        button.action = #selector(closePopupTapped)
+        addSubview(button, positioned: .above, relativeTo: child)
+        popupCloseButton = button
+    }
+
+    @objc private func closePopupTapped() { dismissPopup() }
+
+    private func dismissPopup() {
+        popup?.removeFromSuperview()
+        popup = nil
+        popupCloseButton?.removeFromSuperview()
+        popupCloseButton = nil
     }
 
     func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
@@ -2523,10 +2711,12 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         debugLog("nav fail \(site.title): \(error.localizedDescription)")
+        if webView === popup { dismissPopup() }
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         debugLog("nav provisional fail \(site.title): \(error.localizedDescription)")
+        if webView === popup { dismissPopup() }
     }
 
     override func viewDidMoveToWindow() {
@@ -4054,7 +4244,12 @@ private struct WidgetPickerOverlay: View {
                     TextField("Enter the website, widget, or app you want to see…", text: $search)
                         .textFieldStyle(.plain).font(.system(size: 15, weight: .medium)).onSubmit(submitSearch)
                         .focused($searchFocused)
-                        .onAppear { searchFocused = true }
+                        .onAppear {
+                            searchFocused = true
+                            // The panel can still be settling when the picker
+                            // appears, which drops the first focus request.
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { searchFocused = true }
+                        }
                     Button(action: onClose) {
                         Image(systemName: "xmark.circle.fill").font(.system(size: 18)).foregroundStyle(.white.opacity(0.48))
                     }.buttonStyle(.plain)
@@ -4105,32 +4300,70 @@ private struct WidgetPickerOverlay: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity).preferredColorScheme(.dark)
     }
 
+    private var suggestions: [SiteSuggestion] { SiteCatalog.suggestions(for: search) }
+
     private var websiteContent: some View {
-        VStack(spacing: 12) {
-            Spacer(minLength: 46)
-            Image(systemName: "globe")
-                .font(.system(size: 34, weight: .light))
-                .foregroundStyle(.white.opacity(0.38))
-            Text("Add any website you want")
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.88))
-            Text(search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                 ? "Type a link above and press Return."
-                 : "Press Return to open \(search)")
-                .font(.system(size: 12))
-                .foregroundStyle(.white.opacity(0.46))
+        VStack(alignment: .leading, spacing: 10) {
+            if !suggestions.isEmpty {
+                VStack(spacing: 2) {
+                    ForEach(suggestions) { suggestion in
+                        Button { onAddWebsite(suggestion.url) } label: {
+                            HStack(spacing: 11) {
+                                Text(String(suggestion.name.prefix(1)).uppercased())
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(.white.opacity(0.9))
+                                    .frame(width: 26, height: 26)
+                                    .background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(suggestion.name)
+                                        .font(.system(size: 12.5, weight: .medium))
+                                        .foregroundStyle(.white.opacity(0.94))
+                                    Text(suggestion.host)
+                                        .font(.system(size: 10.5))
+                                        .foregroundStyle(.white.opacity(0.42))
+                                }
+                                Spacer(minLength: 0)
+                                Image(systemName: "return")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(.white.opacity(0.28))
+                            }
+                            .padding(.horizontal, 10).padding(.vertical, 7)
+                            .contentShape(Rectangle())
+                        }.buttonStyle(.plain)
+                    }
+                }
+            } else {
+                VStack(spacing: 12) {
+                    Spacer(minLength: 24)
+                    Image(systemName: search.isEmpty ? "globe" : "magnifyingglass")
+                        .font(.system(size: 32, weight: .light))
+                        .foregroundStyle(.white.opacity(0.36))
+                    Text(search.isEmpty ? "Add any website you want" : "No match for “\(search)”")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.86))
+                    Text(search.isEmpty
+                         ? "Start typing a name — YouTube, Notion, Pokémon Showdown…"
+                         : "Press Return to search the web for it.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.white.opacity(0.46))
+                        .multilineTextAlignment(.center)
+                    Spacer(minLength: 24)
+                }
+                .frame(maxWidth: .infinity)
+            }
 
             if !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Button { onAddWebsite(search) } label: {
-                    Label("Open website", systemImage: "arrow.up.right")
-                        .font(.system(size: 12, weight: .semibold))
-                        .padding(.horizontal, 14).padding(.vertical, 8)
-                        .background(.white.opacity(0.13), in: Capsule())
-                }.buttonStyle(.plain).padding(.top, 6)
+                    Label(suggestions.isEmpty ? "Search the web for “\(search)”" : "Open “\(search)”",
+                          systemImage: "arrow.up.right")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.72))
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(.white.opacity(0.07), in: Capsule())
+                }.buttonStyle(.plain).padding(.top, 2)
             }
-            Spacer(minLength: 0)
         }
-        .frame(maxWidth: .infinity, minHeight: 232)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var widgetContent: some View {
@@ -4417,7 +4650,7 @@ private struct ConfigureWidgetOverlay: View {
 
                     VStack(alignment: .leading, spacing: 10) {
                         HStack(spacing: 7) {
-                            Text("Zap elements")
+                            Text("Zap Elements")
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundStyle(ink)
                             if !site.zapped.isEmpty {
