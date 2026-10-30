@@ -730,8 +730,9 @@ private final class OverlayModel: ObservableObject {
         }
     }
 
-    func addWidget(_ kind: NativeWidgetKind, center: CGPoint) {
+    func addWidget(_ kind: NativeWidgetKind, center: CGPoint, size: CGSize? = nil) {
         let widget = NativeWidgetSurface(kind: kind, center: center)
+        if let size { widget.size = size }
         withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) { widgets.append(widget) }
     }
 
@@ -804,7 +805,7 @@ private final class OverlayModel: ObservableObject {
         struct Placement { let index: Int; let frame: CGRect }
 
         let gap: CGFloat = 18
-        let siteMin = CGSize(width: 360, height: 300)
+        let siteMin = CGSize(width: 240, height: 180)
         var items: [Item] = websites.enumerated().map {
             Item(isWidget: false, index: $0.offset, locked: $0.element.sizeLocked,
                  minSize: siteMin, natural: $0.element.size)
@@ -977,9 +978,13 @@ private final class OverlayModel: ObservableObject {
         guard let url = URL(string: value), ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else { return }
         let center: CGPoint
         let surfaceSize: CGSize
-        if let r = rect, r.width > 80 {
-            center = CGPoint(x: r.midX, y: r.midY)
-            surfaceSize = CGSize(width: max(480, r.width), height: max(360, r.height))
+        if let r = rect, r.width > 24, r.height > 24 {
+            // The user drew this rectangle: use it exactly, only nudging it back
+            // inside the workspace if it runs past an edge.
+            let clamped = r.intersection(CGRect(origin: .zero, size: size))
+            let frame = clamped.isNull ? r : clamped
+            center = CGPoint(x: frame.midX, y: frame.midY)
+            surfaceSize = CGSize(width: max(80, frame.width), height: max(60, frame.height))
         } else {
             center = emptyCenter(for: CGSize(width: min(1060, size.width - 180), height: min(790, size.height - 150)), in: size)
             surfaceSize = CGSize(width: min(1060, size.width - 180), height: min(790, size.height - 150))
@@ -991,9 +996,18 @@ private final class OverlayModel: ObservableObject {
 
     func addNativeWidget(_ kind: NativeWidgetKind, in size: CGSize, rect: CGRect? = nil) {
         let center: CGPoint
-        if let r = rect, r.width > 80 { center = CGPoint(x: r.midX, y: r.midY) }
-        else { center = emptyCenter(for: kind.size, in: size) }
-        addWidget(kind, center: center)
+        var explicitSize: CGSize?
+        if let r = rect, r.width > 24, r.height > 24 {
+            // Drawn rectangles are honoured exactly — the user decides how small
+            // a widget may be.
+            let clamped = r.intersection(CGRect(origin: .zero, size: size))
+            let frame = clamped.isNull ? r : clamped
+            center = CGPoint(x: frame.midX, y: frame.midY)
+            explicitSize = CGSize(width: max(80, frame.width), height: max(60, frame.height))
+        } else {
+            center = emptyCenter(for: kind.size, in: size)
+        }
+        addWidget(kind, center: center, size: explicitSize)
         showingWidgetPicker = false; contextMenuPoint = nil; pendingPickerForRect = nil; dragCreatingRect = .null
     }
 
@@ -1008,7 +1022,7 @@ private enum NativeWidgetKind: String, CaseIterable, Identifiable {
     case clock = "Clock", calendar = "Calendar", note = "Quick Note"
     case timer = "Timer", battery = "Battery", system = "System"
     case weather = "Weather", worldClock = "World Clock"
-    case todo = "To-Do", countdown = "Countdown"
+    case todo = "To-Do", countdown = "Countdown", cricket = "Cricket"
 
     var id: String { rawValue }
 
@@ -1024,6 +1038,7 @@ private enum NativeWidgetKind: String, CaseIterable, Identifiable {
         case .worldClock: "globe"
         case .todo: "checklist"
         case .countdown: "hourglass"
+        case .cricket: "figure.cricket"
         }
     }
 
@@ -1039,22 +1054,25 @@ private enum NativeWidgetKind: String, CaseIterable, Identifiable {
         case .worldClock: CGSize(width: 300, height: 240)
         case .todo: CGSize(width: 320, height: 280)
         case .countdown: CGSize(width: 300, height: 220)
+        case .cricket: CGSize(width: 360, height: 260)
         }
     }
 
-    /// Smallest size that still renders the widget's content.
+    /// Deliberately marginal: below this the content would be clipped, but it is
+    /// the user's call how small a widget gets.
     var minSize: CGSize {
         switch self {
-        case .clock: CGSize(width: 200, height: 160)
-        case .calendar: CGSize(width: 260, height: 250)
-        case .note: CGSize(width: 220, height: 180)
-        case .timer: CGSize(width: 210, height: 160)
-        case .battery: CGSize(width: 190, height: 150)
-        case .system: CGSize(width: 230, height: 170)
-        case .weather: CGSize(width: 240, height: 190)
-        case .worldClock: CGSize(width: 230, height: 180)
-        case .todo: CGSize(width: 240, height: 200)
-        case .countdown: CGSize(width: 230, height: 170)
+        case .clock: CGSize(width: 130, height: 100)
+        case .calendar: CGSize(width: 170, height: 160)
+        case .note: CGSize(width: 140, height: 110)
+        case .timer: CGSize(width: 140, height: 110)
+        case .battery: CGSize(width: 130, height: 100)
+        case .system: CGSize(width: 160, height: 120)
+        case .weather: CGSize(width: 160, height: 130)
+        case .worldClock: CGSize(width: 150, height: 120)
+        case .todo: CGSize(width: 160, height: 130)
+        case .countdown: CGSize(width: 150, height: 120)
+        case .cricket: CGSize(width: 190, height: 140)
         }
     }
 
@@ -1070,6 +1088,7 @@ private enum NativeWidgetKind: String, CaseIterable, Identifiable {
         case .worldClock: "Time around the world"
         case .todo: "A short checklist"
         case .countdown: "Days until a date"
+        case .cricket: "Live scores"
         }
     }
 }
@@ -3873,7 +3892,7 @@ private struct SeeOverlay: View {
             HStack(spacing: 8) {
                 let count = model.websites.count + model.widgets.count
                 if count > 0 {
-                    Text("\(count) \(count == 1 ? "surface" : "surfaces")")
+                    Text("\(count) \(count == 1 ? "vision" : "visions")")
                         .font(.system(size: 11, weight: .regular)).foregroundStyle(.tertiary)
                 }
                 // Handled on mouse-down by the click monitor only: a SwiftUI
@@ -4330,6 +4349,8 @@ private struct NativeWidgetView: View {
             TodoView(widget: widget, ink: ink)
         case .countdown:
             CountdownView(widget: widget, ink: ink)
+        case .cricket:
+            CricketView(widget: widget, ink: ink)
         }
     }
 }
@@ -4472,6 +4493,181 @@ private struct BatteryView: View {
 @MainActor
 private final class TextDraft: ObservableObject {
     @Published var text = ""
+}
+
+// MARK: - Cricket
+
+@MainActor
+private struct CricketView: View {
+    @ObservedObject var widget: NativeWidgetSurface
+    let ink: Color
+    @StateObject private var store = CricketStore()
+
+    private var matches: [CricketStore.Match] { store.matches }
+
+    private var index: Int {
+        guard !matches.isEmpty else { return 0 }
+        return min(max(0, Int(widget.note) ?? 0), matches.count - 1)
+    }
+
+    var body: some View {
+        Group {
+            if let match = matches.isEmpty ? nil : matches[index] {
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack(spacing: 6) {
+                        Text(match.league.uppercased())
+                            .font(.system(size: 9, weight: .semibold)).tracking(0.8)
+                            .foregroundStyle(ink.opacity(0.38))
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                        if matches.count > 1 {
+                            HStack(spacing: 2) {
+                                Button { widget.note = String((index + matches.count - 1) % matches.count) } label: {
+                                    Image(systemName: "chevron.left").font(.system(size: 9, weight: .bold))
+                                        .foregroundStyle(ink.opacity(0.4))
+                                        .frame(width: 16, height: 16).contentShape(Rectangle())
+                                }.buttonStyle(.plain)
+                                Button { widget.note = String((index + 1) % matches.count) } label: {
+                                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold))
+                                        .foregroundStyle(ink.opacity(0.4))
+                                        .frame(width: 16, height: 16).contentShape(Rectangle())
+                                }.buttonStyle(.plain)
+                            }
+                        }
+                    }
+                    ForEach(match.rows, id: \.name) { row in
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text(row.name)
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(ink.opacity(0.9))
+                                .frame(width: 42, alignment: .leading)
+                            Text(row.score)
+                                .font(.system(size: 13, weight: row.batting ? .semibold : .regular))
+                                .monospacedDigit()
+                                .foregroundStyle(row.batting ? ink : ink.opacity(0.55))
+                                .lineLimit(1).minimumScaleFactor(0.7)
+                            Spacer(minLength: 0)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                    Text(match.status)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(match.live ? Color(red: 0.45, green: 0.85, blue: 0.5) : ink.opacity(0.45))
+                        .lineLimit(1).minimumScaleFactor(0.7)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .task(id: match.id) { await store.start() }
+            } else {
+                VStack(spacing: 6) {
+                    Image(systemName: "figure.cricket").font(.system(size: 18, weight: .light))
+                        .foregroundStyle(ink.opacity(0.4))
+                    Text(store.status.isEmpty ? "Finding a match…" : store.status)
+                        .font(.system(size: 11)).foregroundStyle(ink.opacity(0.5))
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .task { await store.start() }
+            }
+        }
+    }
+}
+
+/// Live cricket from ESPN's public scoreboards: a handful of league ids are
+/// polled together and the first live match wins, then the next fixture.
+@MainActor
+private final class CricketStore: ObservableObject {
+    struct Row: Identifiable {
+        let name: String
+        let score: String
+        let batting: Bool
+        var id: String { name }
+    }
+    struct Match: Identifiable {
+        let id: String
+        let league: String
+        let rows: [Row]
+        let status: String
+        let live: Bool
+        let date: Date
+    }
+
+    @Published var matches: [Match] = []
+    @Published var status = ""
+    private var timer: Timer?
+    private var loading = false
+
+    private let leagues: [(String, String)] = [
+        ("8048", "IPL"), ("8039", "World Cup"), ("8038", "WC Qualifier"),
+        ("8040", "T20 WC Qualifier"), ("8037", "Champions Trophy"),
+        ("8050", "Ranji Trophy"), ("8043", "Sheffield Shield"),
+        ("8044", "Big Bash"), ("8052", "County")
+    ]
+
+    func start() async {
+        guard timer == nil else { return }
+        await refresh()
+        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.refresh() }
+        }
+    }
+
+    private func refresh() async {
+        guard !loading else { return }
+        loading = true
+        defer { loading = false }
+
+        var found: [Match] = []
+        await withTaskGroup(of: Match?.self) { group in
+            for (id, name) in leagues {
+                group.addTask { await CricketStore.fetch(league: id, name: name) }
+            }
+            for await match in group {
+                if let match { found.append(match) }
+            }
+        }
+        found.sort { a, b in
+            if a.live != b.live { return a.live }
+            return a.date < b.date
+        }
+        matches = Array(found.prefix(8))
+        status = matches.isEmpty ? "No matches right now" : ""
+    }
+
+    private static func fetch(league id: String, name: String) async -> Match? {
+        guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/cricket/\(id)/scoreboard") else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        guard let data = try? await URLSession.shared.data(for: request).0,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let events = json["events"] as? [[String: Any]],
+              let event = events.first,
+              let competitions = event["competitions"] as? [[String: Any]],
+              let competition = competitions.first else { return nil }
+
+        let state = ((event["status"] as? [String: Any])?["type"] as? [String: Any])?["state"] as? String ?? "pre"
+        let summary = (event["status"] as? [String: Any])?["summary"] as? String ?? ""
+        let dateString = event["date"] as? String ?? ""
+        let date = ISO8601DateFormatter().date(from: dateString) ?? Date()
+
+        var rows: [Row] = []
+        for competitor in (competition["competitors"] as? [[String: Any]]) ?? [] {
+            let team = competitor["team"] as? [String: Any]
+            let short = (team?["abbreviation"] as? String)
+                ?? (team?["shortDisplayName"] as? String)
+                ?? (team?["displayName"] as? String) ?? "—"
+            let score = (competitor["score"] as? String) ?? ""
+            let batting = (competitor["winner"] as? Bool) ?? false
+            rows.append(Row(name: short, score: score.isEmpty ? "—" : score, batting: batting))
+        }
+        guard !rows.isEmpty else { return nil }
+
+        let leagueName = ((json["leagues"] as? [[String: Any]])?.first?["abbreviation"] as? String)
+            ?? ((json["leagues"] as? [[String: Any]])?.first?["name"] as? String) ?? name
+        let status = summary.isEmpty ? (state == "in" ? "Live" : "") : summary
+        return Match(id: event["id"] as? String ?? UUID().uuidString,
+                     league: leagueName, rows: rows, status: status,
+                     live: state == "in", date: date)
+    }
 }
 
 // MARK: - Weather
@@ -5682,7 +5878,14 @@ private struct ConfigureWidgetOverlay: View {
                                 .foregroundStyle(dim)
                             Toggle("", isOn: Binding(
                                 get: { site.config.darkMode },
-                                set: { site.config.darkMode = $0; site.applyTuning(reload: false) }
+                                set: { value in
+                                    site.config.darkMode = value
+                                    // Turning it on is a styling pass that can be
+                                    // applied live; turning it off has to undo
+                                    // styles the page painted itself, so the page
+                                    // is reloaded once with dark mode gone.
+                                    site.applyTuning(reload: !value)
+                                }
                             ))
                             .toggleStyle(.switch).labelsHidden().controlSize(.small)
                         }
