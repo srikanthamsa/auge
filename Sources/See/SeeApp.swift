@@ -1459,6 +1459,32 @@ enum SiteCatalog {
 }
 
 private enum PageScripts {
+    /// Google's identity services read `window.webkit.messageHandlers` as proof
+    /// that they are inside an embedded web view and then refuse to sign in
+    /// ("Google sign-in can't finish here"). See drives the page from Swift
+    /// through evaluateJavaScript and registers no script message handlers, so
+    /// the bridge can be hidden from page scripts without losing anything.
+    /// Runs before the document so nothing can cache the original reference.
+    static let hideWebViewBridge = """
+    (() => {
+      try {
+        // `window.webkit` itself is non-configurable, but its messageHandlers
+        // property can be neutralised on the instance and on the prototype, so
+        // frames created later inherit the neutral version too.
+        const neutralize = (ns) => {
+          if (!ns) return;
+          try { Object.defineProperty(ns, 'messageHandlers', {value: undefined, configurable: true}); } catch (_) {}
+          try {
+            const proto = Object.getPrototypeOf(ns);
+            if (proto) Object.defineProperty(proto, 'messageHandlers', {value: undefined, configurable: true});
+          } catch (_) {}
+        };
+        neutralize(window.webkit);
+      } catch (_) {}
+    })();
+    """
+
+
     /// Watches for clicks on third-party sign-in buttons. Some of those flows
     /// need a browser capability an embedded WKWebView does not have (Google's
     /// One Tap needs FedCM), so See can tell the user instead of leaving a dead
@@ -2460,6 +2486,9 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     @Published var size: CGSize {
         didSet { debugLog("site size \(oldValue.width)x\(oldValue.height) -> \(size.width)x\(size.height)") }
     }
+    /// 0…1 for the loading beam that runs along the card's bottom edge.
+    @Published var loadProgress: Double = 0
+    @Published var isLoading = false
     @Published var config: WebsiteConfig
     @Published var scrollY: Double = 0
     @Published var isPickingElements = false
@@ -2581,6 +2610,8 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
                                               injectionTime: .atDocumentEnd, forMainFrameOnly: true))
         controller.addUserScript(WKUserScript(source: PageScripts.zapper,
                                               injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        controller.addUserScript(WKUserScript(source: PageScripts.hideWebViewBridge,
+                                              injectionTime: .atDocumentStart, forMainFrameOnly: false))
         if config.darkMode {
             controller.addUserScript(WKUserScript(source: PageScripts.darkMode,
                                                   injectionTime: .atDocumentStart, forMainFrameOnly: false))
@@ -2861,11 +2892,137 @@ private struct WebsiteView: NSViewRepresentable {
     final class Coordinator { var lastRequestID = -1 }
 }
 
+/// The loading beam. It lives in AppKit rather than as a SwiftUI overlay: a
+/// WKWebView is an NSView, and SwiftUI content layered over one gets painted
+/// under it, so the beam would never be visible.
+///
+/// The beam sweeps left to right on its own clock for as long as the page is
+/// fetching — tying it to `estimatedProgress` made it freeze or jump to the
+/// right edge, because WebKit reports progress in a handful of big steps. The
+/// faint rail underneath does show the real fraction.
+@MainActor
+private final class PageLoadBeamView: NSView {
+    private let rail = CALayer()
+    private let fill = CAGradientLayer()
+    private let beam = CAGradientLayer()
+    private let glow = CAGradientLayer()
+    private var progress: Double = 0
+
+    private static let cyan = NSColor(calibratedRed: 0.36, green: 0.85, blue: 1.0, alpha: 1)
+    private static let violet = NSColor(calibratedRed: 0.72, green: 0.45, blue: 1.0, alpha: 1)
+
+    override var isFlipped: Bool { true }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.masksToBounds = false
+
+        rail.backgroundColor = NSColor.white.withAlphaComponent(0.07).cgColor
+        layer?.addSublayer(rail)
+
+        fill.startPoint = CGPoint(x: 0, y: 0.5)
+        fill.endPoint = CGPoint(x: 1, y: 0.5)
+        fill.colors = [PageLoadBeamView.cyan.withAlphaComponent(0.55).cgColor,
+                       PageLoadBeamView.violet.withAlphaComponent(0.55).cgColor]
+        fill.cornerRadius = 1
+        layer?.addSublayer(fill)
+
+        let stops = [
+            NSColor.clear.cgColor,
+            PageLoadBeamView.cyan.withAlphaComponent(0.15).cgColor,
+            PageLoadBeamView.cyan.cgColor,
+            NSColor.white.cgColor,
+            PageLoadBeamView.violet.cgColor,
+            PageLoadBeamView.violet.withAlphaComponent(0.25).cgColor,
+            NSColor.clear.cgColor
+        ]
+        beam.startPoint = CGPoint(x: 0, y: 0.5)
+        beam.endPoint = CGPoint(x: 1, y: 0.5)
+        beam.colors = stops
+        beam.locations = [0, 0.25, 0.42, 0.58, 0.74, 0.86, 1]
+        beam.shadowColor = PageLoadBeamView.cyan.cgColor
+        beam.shadowOpacity = 1
+        beam.shadowRadius = 9
+        beam.shadowOffset = .zero
+        beam.masksToBounds = false
+        layer?.addSublayer(beam)
+
+        // A wider, fainter copy gives the light a halo that reads on light pages.
+        glow.startPoint = beam.startPoint
+        glow.endPoint = beam.endPoint
+        glow.colors = stops
+        glow.locations = [0, 0.30, 0.45, 0.60, 0.75, 0.88, 1]
+        glow.opacity = 0.55
+        glow.masksToBounds = false
+        layer?.insertSublayer(glow, below: beam)
+        alphaValue = 0
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    func update(progress value: Double, active: Bool) {
+        progress = min(max(value, 0), 1)
+        layoutLayers()
+        // Restarting on every progress tick pinned the beam to the left edge.
+        if active, beam.animation(forKey: "sweep") == nil { startSweep() }
+        let target: CGFloat = active ? 1 : 0
+        guard abs(alphaValue - target) > 0.01 else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = active ? 0.16 : 0.34
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            animator().alphaValue = target
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        layoutLayers()
+    }
+
+    override func layout() {
+        super.layout()
+        layoutLayers()
+    }
+
+    private var beamWidth: CGFloat { max(70, bounds.width * 0.22) }
+
+    private func layoutLayers() {
+        guard bounds.width > 0 else { return }
+        let height = bounds.height
+        let lineY = height - 2
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        rail.frame = CGRect(x: 0, y: lineY, width: bounds.width, height: 1)
+        fill.frame = CGRect(x: 0, y: lineY - 0.5, width: bounds.width * CGFloat(progress), height: 2)
+        beam.frame = CGRect(x: 0, y: lineY - 2, width: beamWidth, height: 3)
+        beam.cornerRadius = 1.5
+        glow.frame = CGRect(x: 0, y: lineY - 7, width: beamWidth, height: 13)
+        CATransaction.commit()
+        if alphaValue > 0, beam.animation(forKey: "sweep") == nil { startSweep() }
+    }
+
+    private func startSweep() {
+        guard bounds.width > 0 else { return }
+        let width = beamWidth
+        let animation = CABasicAnimation(keyPath: "position.x")
+        animation.fromValue = -width / 2
+        animation.toValue = bounds.width + width / 2
+        animation.duration = 1.25
+        animation.repeatCount = .infinity
+        animation.timingFunction = CAMediaTimingFunction(name: .linear)
+        animation.isRemovedOnCompletion = false
+        beam.removeAnimation(forKey: "sweep")
+        beam.add(animation, forKey: "sweep")
+        glow.removeAnimation(forKey: "sweep")
+        glow.add(animation, forKey: "sweep")
+    }
+}
+
 @MainActor
 private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate {
     private let site: WebsiteSurface
     let webView: WKWebView
     private let handles: WebsiteHandleView
+    private let beam = PageLoadBeamView(frame: .zero)
     private let bridge = SeeWebBridge()
     var onHoverChange: ((Bool) -> Void)?
     var onClose: (() -> Void)?
@@ -2895,7 +3052,37 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
         bridge.onPick = onPick
         webView.navigationDelegate = self
         webView.uiDelegate = self
-        addSubview(webView); addSubview(handles, positioned: .above, relativeTo: webView)
+        webView.addObserver(self, forKeyPath: #keyPath(WKWebView.estimatedProgress), options: [.new], context: nil)
+        webView.addObserver(self, forKeyPath: #keyPath(WKWebView.isLoading), options: [.new], context: nil)
+        beam.autoresizingMask = [.width, .minYMargin]
+        addSubview(webView)
+        addSubview(beam)
+        addSubview(handles, positioned: .above, relativeTo: beam)
+    }
+
+    override func observeValue(forKeyPath keyPath: String?, of object: Any?,
+                               change: [NSKeyValueChangeKey: Any]?, context: UnsafeMutableRawPointer?) {
+        guard object as AnyObject? === webView else {
+            super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
+            return
+        }
+        switch keyPath {
+        case #keyPath(WKWebView.estimatedProgress):
+            let value = webView.estimatedProgress
+            if value > site.loadProgress || value >= 1 { site.loadProgress = value }
+            beam.update(progress: site.loadProgress, active: webView.isLoading)
+        case #keyPath(WKWebView.isLoading):
+            site.isLoading = webView.isLoading
+            if webView.isLoading { site.loadProgress = max(0, min(site.loadProgress, 0.08)) }
+            beam.update(progress: site.loadProgress, active: webView.isLoading)
+        default:
+            super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
+        }
+    }
+
+    func stopObservingProgress() {
+        webView.removeObserver(self, forKeyPath: #keyPath(WKWebView.estimatedProgress))
+        webView.removeObserver(self, forKeyPath: #keyPath(WKWebView.isLoading))
     }
     required init?(coder: NSCoder) { fatalError() }
     override var isFlipped: Bool { true }
@@ -2933,7 +3120,7 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
         // Only the identity callback page is safe to drop: closing a real page
         // would break the flow the opener is still waiting on.
         let url = webView.url?.absoluteString ?? ""
-        webView.evaluateJavaScript("JSON.stringify({h: location.host, p: location.pathname, o: !!window.opener, t: (document.body?document.body.innerText.length:-1)})") { v, _ in
+        webView.evaluateJavaScript("JSON.stringify({h: location.host, p: location.pathname, o: !!window.opener, t: (document.body?document.body.innerText.length:-1), top: window===top, webkit: !!window.webkit, handlers: !!window.webkit?.messageHandlers, chrome: !!window.chrome, fedcm: !!window.FedCM, credsGet: !!(navigator.credentials&&navigator.credentials.get), uad: !!navigator.userAgentData, ua: navigator.userAgent.slice(0,80)})") { v, _ in
             debugLog("popup nav -> \(String(describing: v))")
         }
         let isCallback = url.contains("gis_transform") || url.contains("oauth2") == false && url.contains("gsi")
@@ -2976,8 +3163,11 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
         popup = child
         addPopupCloseButton(over: child)
         installPopupEscape()
-        if let url = navigationAction.request.url { child.load(URLRequest(url: url)) }
-        debugLog("popup open host=\(navigationAction.request.url?.host ?? "-")")
+        // Do NOT load the request by hand: WebKit loads it into this very web
+        // view as part of the window relationship, and a fresh load() throws
+        // that away — `window.opener` then reads as null and Google's
+        // "Sign in with Google" refuses with "a popup that can talk back".
+        debugLog("popup open host=\(navigationAction.request.url?.host ?? "-") opener=\(configuration.websiteDataStore === webView.configuration.websiteDataStore)")
         return child
     }
 
@@ -3078,6 +3268,8 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
 
     override func layout() {
         super.layout(); webView.frame = bounds; handles.frame = bounds; handles.needsDisplay = true
+        let beamHeight = max(8, bounds.height * 0.02)
+        beam.frame = CGRect(x: 0, y: bounds.height - beamHeight, width: bounds.width, height: beamHeight)
     }
 
     override func mouseEntered(with event: NSEvent) {
