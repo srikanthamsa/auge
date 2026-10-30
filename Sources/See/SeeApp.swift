@@ -1308,6 +1308,196 @@ private enum PageScripts {
         """
     }
 
+    /// Page-local element zapper. The page owns the registry, so a zap is an
+    /// inline `display:none` on one element (not a stylesheet rule) and a
+    /// restore is `display = ''` — which always brings it back, without a reload
+    /// and without depending on a selector still matching a re-rendered DOM.
+    static let zapper = #"""
+    (function () {
+      if (window.__seeZapper) { return; }
+      var STORAGE_KEY = 'zapped_elements_registry';
+
+      function ensureStyles() {
+        if (document.getElementById('zapper-core-styles')) { return; }
+        var style = document.createElement('style');
+        style.id = 'zapper-core-styles';
+        style.textContent = [
+          '.zapper-target-hover { outline: 2px dashed #ff3366 !important;',
+          '  background-color: rgba(255, 51, 102, 0.15) !important;',
+          '  cursor: crosshair !important; }'
+        ].join(String.fromCharCode(10));
+        (document.head || document.documentElement).appendChild(style);
+      }
+
+      function getDOMPath(el) {
+        var path = [];
+        while (el && el.nodeType === Node.ELEMENT_NODE) {
+          var index = 0, sibling = el.previousSibling;
+          while (sibling) {
+            if (sibling.nodeType === Node.ELEMENT_NODE) { index++; }
+            sibling = sibling.previousSibling;
+          }
+          path.unshift({ tag: el.nodeName.toLowerCase(), index: index });
+          el = el.parentNode;
+          if (el && (el.nodeName === 'BODY' || el.nodeName === 'HTML')) { break; }
+        }
+        return path;
+      }
+
+      function getRegistry() {
+        try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); }
+        catch (e) { return []; }
+      }
+
+      function notify() {
+        try {
+          window.webkit.messageHandlers.seeZap.postMessage({ items: getRegistry() });
+        } catch (e) {}
+      }
+
+      function saveToRegistry(data) {
+        var registry = getRegistry();
+        registry.push(data);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(registry));
+        notify();
+      }
+
+      function removeFromRegistry(id) {
+        var registry = getRegistry().filter(function (item) { return item.id !== id; });
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(registry));
+        notify();
+      }
+
+      function findElementByPath(path) {
+        var current = document.body;
+        for (var i = 0; i < path.length; i++) {
+          if (i === 0 && path[i].tag === 'body') { continue; }
+          if (!current) { return null; }
+          var children = Array.prototype.slice.call(current.children);
+          var matchedByTag = children.filter(function (child) {
+            return child.nodeName.toLowerCase() === path[i].tag;
+          });
+          current = children[path[i].index] || matchedByTag[0] || null;
+        }
+        return current;
+      }
+
+      function hideZappedElements() {
+        ensureStyles();
+        getRegistry().forEach(function (item) {
+          var target = findElementByPath(item.path);
+          if (target) { target.style.display = 'none'; }
+        });
+        notify();
+      }
+
+      var highlighted = null;
+      var active = false;
+
+      function hover(x, y) {
+        var el = document.elementFromPoint(x, y);
+        if (el === highlighted) { return; }
+        if (highlighted && highlighted.classList) { highlighted.classList.remove('zapper-target-hover'); }
+        highlighted = null;
+        if (!el || el === document.body || el === document.documentElement) { return; }
+        el.classList.add('zapper-target-hover');
+        highlighted = el;
+      }
+
+      function clearHover() {
+        if (highlighted && highlighted.classList) { highlighted.classList.remove('zapper-target-hover'); }
+        highlighted = null;
+      }
+
+      function zapElement(el) {
+        if (!el || el === document.body || el === document.documentElement) { return null; }
+        if (el.classList) { el.classList.remove('zapper-target-hover'); }
+        highlighted = null;
+        var path = getDOMPath(el);
+        var data = {
+          id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(36).slice(2)),
+          tag: el.nodeName.toLowerCase(),
+          classes: Array.prototype.slice.call(el.classList).join(' '),
+          snippet: (el.outerHTML || '').slice(0, 120),
+          path: path,
+          timestamp: Date.now()
+        };
+        saveToRegistry(data);
+        el.style.display = 'none';
+        return data;
+      }
+
+      function zapAt(x, y) {
+        clearHover();
+        return zapElement(document.elementFromPoint(x, y));
+      }
+
+      function restore(id) {
+        var registry = getRegistry();
+        for (var i = 0; i < registry.length; i++) {
+          if (registry[i].id === id) {
+            var target = findElementByPath(registry[i].path);
+            if (target) { target.style.display = ''; }
+            break;
+          }
+        }
+        removeFromRegistry(id);
+      }
+
+      function clearAll() {
+        var registry = getRegistry();
+        registry.forEach(function (item) {
+          var target = findElementByPath(item.path);
+          if (target) { target.style.display = ''; }
+        });
+        localStorage.setItem(STORAGE_KEY, '[]');
+        notify();
+      }
+
+      function handleMouseMove(e) { if (active) { hover(e.clientX, e.clientY); } }
+
+      function handleClick(e) {
+        if (!active) { return; }
+        e.preventDefault();
+        e.stopPropagation();
+        zapElement(e.target);
+        disable();
+      }
+
+      function enable() {
+        ensureStyles();
+        active = true;
+        document.addEventListener('mousemove', handleMouseMove, true);
+        document.addEventListener('click', handleClick, true);
+      }
+
+      function disable() {
+        active = false;
+        clearHover();
+        document.removeEventListener('mousemove', handleMouseMove, true);
+        document.removeEventListener('click', handleClick, true);
+      }
+
+      window.__seeZapper = {
+        enable: enable,
+        disable: disable,
+        hover: hover,
+        zapAt: zapAt,
+        restore: restore,
+        clearAll: clearAll,
+        refresh: hideZappedElements,
+        list: getRegistry,
+        isActive: function () { return active; }
+      };
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', hideZappedElements);
+      } else {
+        hideZappedElements();
+      }
+    })();
+    """#
+
     static let picker = """
     (function(){
       if (window.__seePickerActive) { return; }
@@ -1735,6 +1925,11 @@ private final class SeeWebBridge: NSObject, WKScriptMessageHandler {
         case "seeScroll":
             if let value = message.body as? Double { site?.scrollY = value }
             else if let value = message.body as? NSNumber { site?.scrollY = value.doubleValue }
+        case "seeZap":
+            if let body = message.body as? [String: Any],
+               let items = body["items"] as? [[String: Any]] {
+                site?.updateZapped(items)
+            }
         default:
             break
         }
@@ -1772,6 +1967,16 @@ private final class NativeWidgetSurface: ObservableObject, Identifiable {
     }
 }
 
+/// One zapped element as the page reports it.
+struct ZappedSummary: Identifiable, Equatable {
+    let id: String
+    let tag: String
+    let classes: String
+    let snippet: String
+
+    var label: String { classes.isEmpty ? tag : tag + "." + classes.split(separator: " ").joined(separator: ".") }
+}
+
 @MainActor
 private final class WebsiteSurface: ObservableObject, Identifiable {
     let id: UUID
@@ -1786,6 +1991,8 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     @Published var config: WebsiteConfig
     @Published var scrollY: Double = 0
     @Published var isPickingElements = false
+    /// Elements the page itself has zapped, mirrored here for the config panel.
+    @Published private(set) var zapped: [ZappedSummary] = []
     /// Cursor the page itself wants at the last probed point (`pointer`, `text`…).
     @Published var pageCursor: String = "default"
 
@@ -1882,14 +2089,10 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     func installUserScripts(in webView: WKWebView) {
         let controller = webView.configuration.userContentController
         controller.removeAllUserScripts()
-        if !config.hiddenSelectors.isEmpty {
-            // Document start: the elements are hidden before the first paint, so a
-            // zapped item never flashes when the peek opens.
-            controller.addUserScript(WKUserScript(source: PageScripts.hideCSS(config.hiddenSelectors),
-                                                  injectionTime: .atDocumentStart, forMainFrameOnly: false))
-            controller.addUserScript(WKUserScript(source: PageScripts.hideCSS(config.hiddenSelectors),
-                                                  injectionTime: .atDocumentEnd, forMainFrameOnly: false))
-        }
+        // The zapper owns the "hidden elements" list in the page's own storage,
+        // so it has to exist before the document paints.
+        controller.addUserScript(WKUserScript(source: PageScripts.zapper,
+                                              injectionTime: .atDocumentStart, forMainFrameOnly: true))
         if config.darkMode {
             controller.addUserScript(WKUserScript(source: PageScripts.darkMode,
                                                   injectionTime: .atDocumentStart, forMainFrameOnly: false))
@@ -1953,30 +2156,17 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     }
 
     func setPicking(_ picking: Bool) {
-        guard picking != isPickingElements else {
-            if !picking { webView?.evaluateJavaScript(PageScripts.stopPicker, completionHandler: nil) }
-            return
-        }
         isPickingElements = picking
-        if picking { exitChromeMode() }
-        webHost?.refreshHandles()
-        debugLog("setPicking \(picking) hidden=\(String(describing: webView?.isHidden))")
         guard let webView else { return }
-        installUserScripts(in: webView)
-        if !picking { webView.evaluateJavaScript(PageScripts.clearPicker, completionHandler: nil) }
-        webView.evaluateJavaScript(picking ? PageScripts.picker : PageScripts.stopPicker) { [weak webView] _, _ in
-            guard !picking else { return }
-            webView?.evaluateJavaScript("(document.getElementById('__see_zap_box') ? 'box ' : '') + (document.getElementById('__see_zap_label') ? 'label ' : '') + '|' + document.documentElement.style.cursor") { value, _ in
-                debugLog("picker cleanup left=\(String(describing: value))")
-            }
-        }
         if picking {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak webView] in
-                webView?.evaluateJavaScript("window.__seeHoverAt && window.__seeHoverAt(300,200); JSON.stringify({a: !!window.__seePickerActive, m: typeof window.__seeHoverAt, tag: (document.elementFromPoint(300,200)||{}).tagName, cls: (document.elementFromPoint(300,200)||{}).className, boxLeft: (document.getElementById('__see_zap_box')||{}).style ? document.getElementById('__see_zap_box').style.left : 'none', boxW: document.getElementById('__see_zap_box') ? document.getElementById('__see_zap_box').style.width : 'none'})") { value, error in
-                    debugLog("picker state: \(String(describing: value)) err=\(String(describing: error))")
-                }
-            }
+            exitChromeMode()
+            webView.evaluateJavaScript("window.__seeZapper && window.__seeZapper.enable();", completionHandler: nil)
+        } else {
+            webView.evaluateJavaScript("window.__seeZapper && window.__seeZapper.disable();", completionHandler: nil)
+            refreshChromeSnapshot()
         }
+        webHost?.refreshHandles()
+        debugLog("setPicking \(picking) hidden=\(String(describing: webView.isHidden))")
     }
 
     private var lastHoverAt = CFAbsoluteTimeGetCurrent()
@@ -1990,7 +2180,7 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         lastHoverAt = now
         let x = Int(point.x.rounded()), y = Int(point.y.rounded())
         guard x >= 0, y >= 0, x <= Int(size.width), y <= Int(size.height) else { return }
-        webView.evaluateJavaScript("window.__seeHoverAt && window.__seeHoverAt(\(x), \(y));", completionHandler: nil)
+        webView.evaluateJavaScript("window.__seeZapper ? window.__seeZapper.hover(\(x), \(y)) : (window.__seeHoverAt && window.__seeHoverAt(\(x), \(y)));", completionHandler: nil)
     }
 
     /// Asks the page what cursor it wants at a point (throttled).
@@ -2042,15 +2232,37 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         webView?.evaluateJavaScript("window.__seeSmartHoverClear && window.__seeSmartHoverClear();", completionHandler: nil)
     }
 
-    func addHiddenSelector(_ selector: String) {
-        if !config.hiddenSelectors.contains(selector) {
-            config.hiddenSelectors.append(selector)
+    // MARK: Zapper
+
+    func updateZapped(_ items: [[String: Any]]) {
+        let mapped: [ZappedSummary] = items.compactMap { item in
+            guard let id = item["id"] as? String else { return nil }
+            return ZappedSummary(id: id,
+                                 tag: item["tag"] as? String ?? "element",
+                                 classes: item["classes"] as? String ?? "",
+                                 snippet: item["snippet"] as? String ?? "")
         }
-        applyHiddenSelectors()
-        // The page already hid the element in JS; refresh the frozen snapshot so
-        // the panel shows the result without waiting for a reload.
+        if mapped.map(\.id) != zapped.map(\.id) { zapped = mapped }
+        if isPickingElements, !mapped.isEmpty, let last = mapped.last {
+            debugLog("zapper added \(last.tag).\(last.classes) total=\(mapped.count)")
+            refreshChromeSnapshot()
+        }
+    }
+
+    func startZapper() { webView?.evaluateJavaScript("window.__seeZapper && window.__seeZapper.enable();", completionHandler: nil) }
+    func stopZapper() { webView?.evaluateJavaScript("window.__seeZapper && window.__seeZapper.disable();", completionHandler: nil) }
+
+    func restoreZapped(_ id: String) {
+        webView?.evaluateJavaScript("window.__seeZapper && window.__seeZapper.restore(\"\(id)\");", completionHandler: nil)
+        MenuHover.shared.clear("uz:" + id)
+        debugLog("zapper restore \(id)")
         refreshChromeSnapshot()
-        debugLog("hide selector \(selector)")
+    }
+
+    func clearZapped() {
+        webView?.evaluateJavaScript("window.__seeZapper && window.__seeZapper.clearAll();", completionHandler: nil)
+        debugLog("zapper clear all")
+        refreshChromeSnapshot()
     }
 
     func refreshChromeSnapshot() {
@@ -2071,9 +2283,9 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         if config.rememberScroll, scrollY > 0 {
             webView.evaluateJavaScript("window.scrollTo(0, \(Int(scrollY)));", completionHandler: nil)
         }
-        applyHiddenSelectors()
+        webView.evaluateJavaScript("window.__seeZapper && window.__seeZapper.refresh();", completionHandler: nil)
         if isPickingElements {
-            webView.evaluateJavaScript(PageScripts.picker, completionHandler: nil)
+            webView.evaluateJavaScript("window.__seeZapper && window.__seeZapper.enable();", completionHandler: nil)
         }
     }
 
@@ -2163,6 +2375,7 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate {
         controller.add(handler, name: "seeScroll")
         controller.add(handler, name: "seeDebugLog")
         controller.add(handler, name: "seeCursor")
+        controller.add(handler, name: "seeZap")
         configuration.userContentController = controller
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init(frame: .zero)
@@ -2484,11 +2697,7 @@ private struct SeeOverlay: View {
                                       isFocused: model.focusedID == site.id,
                                       onFocus: { model.focusedID = site.id },
                                       onClose: { model.remove(site) },
-                                      onPick: { selector in
-                                          // Stay in picking mode so several elements can be
-                                          // zapped in a row without reopening the panel.
-                                          site.addHiddenSelector(selector)
-                                      })
+                                      onPick: { _ in })
                         .scaleEffect(appeared ? 1 : 0.97)
                         .opacity(surfaceOpacity(appeared ? 1 : 0, for: site))
                         .animation(.spring(response: 0.26, dampingFraction: 0.74)
@@ -2825,28 +3034,27 @@ private struct SeeOverlay: View {
                     Text("\(count) \(count == 1 ? "surface" : "surfaces")")
                         .font(.system(size: 11, weight: .regular)).foregroundStyle(.tertiary)
                 }
-                Button(action: pinToggle) {
-                    Image(systemName: model.pinned ? "pin.fill" : "pin")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(model.pinned ? Color.accentColor : Color.white.opacity(0.85))
-                        .frame(width: 32, height: 32)
-                        .background(.ultraThinMaterial, in: Circle())
-                        .overlay(Circle().strokeBorder(.white.opacity(0.09), lineWidth: 0.5))
-                        .contentShape(Circle())
-                        .background {
-                            GeometryReader { proxy in
-                                Color.clear
-                                    .onAppear {
-                                        MenuHover.shared.setAction("tb:pin", pinToggle)
-                                        MenuHover.shared.register("tb:pin", proxy.frame(in: .global))
-                                    }
-                                    .onChange(of: proxy.frame(in: .global)) { _, new in
-                                        MenuHover.shared.register("tb:pin", new)
-                                    }
-                            }
+                // Handled on mouse-down by the click monitor only: a SwiftUI
+                // Button here would fire a second time on the release.
+                Image(systemName: model.pinned ? "pin.fill" : "pin")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(model.pinned ? Color.accentColor : Color.white.opacity(0.85))
+                    .frame(width: 32, height: 32)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .overlay(Circle().strokeBorder(.white.opacity(0.09), lineWidth: 0.5))
+                    .contentShape(Circle())
+                    .background {
+                        GeometryReader { proxy in
+                            Color.clear
+                                .onAppear {
+                                    MenuHover.shared.setAction("tb:pin", pinToggle)
+                                    MenuHover.shared.register("tb:pin", proxy.frame(in: .global))
+                                }
+                                .onChange(of: proxy.frame(in: .global)) { _, new in
+                                    MenuHover.shared.register("tb:pin", new)
+                                }
                         }
-                }
-                .buttonStyle(.plain)
+                    }
                 .help(model.pinned ? "Unpin — release Fn to close" : "Pin — keep open after Fn is released")
 
                 Button {
@@ -3601,6 +3809,8 @@ private final class MenuHover: ObservableObject {
     private var frames: [String: CGRect] = [:]
 
     private var actions: [String: () -> Void] = [:]
+    private var lastHitID: String?
+    private var lastHitTime: CFAbsoluteTime = 0
 
     func register(_ id: String, _ frame: CGRect) {
         if frame.width < 2 || frame.height < 2 { return }
@@ -3626,6 +3836,11 @@ private final class MenuHover: ObservableObject {
             if best == nil || d < best!.distance { best = (id, d) }
         }
         guard let hit = best, let action = actions[hit.id] else { return false }
+        // One physical click can reach the app twice (the panel is re-delivered
+        // as it becomes key), which made a toggle fire twice and cancel itself.
+        let now = CFAbsoluteTimeGetCurrent()
+        if hit.id == lastHitID, now - lastHitTime < 0.3 { return true }
+        lastHitID = hit.id; lastHitTime = now
         row = nil
         action()
         return true
@@ -4052,38 +4267,39 @@ private struct ConfigureWidgetOverlay: View {
 
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {
-                            Text("Hide page elements").font(.system(size: 13, weight: .medium)).foregroundStyle(ink)
+                            Text("Zap elements").font(.system(size: 13, weight: .medium)).foregroundStyle(ink)
                             Spacer()
                             Button {
-                                if site.isPickingElements { site.setPicking(false) } else { onSelectElements() }
+                                if site.isPickingElements { site.setPicking(false) } else { site.setPicking(true) }
                             } label: {
-                                Text(site.isPickingElements ? "Cancel" : "Select on page…")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(site.isPickingElements ? Color(red: 0.42, green: 0.72, blue: 1.0) : ink)
-                                    .padding(.horizontal, 11).padding(.vertical, 6)
-                                    .background(.white.opacity(0.12), in: Capsule())
+                                HStack(spacing: 5) {
+                                    Image(systemName: site.isPickingElements ? "xmark" : "bolt.slash")
+                                        .font(.system(size: 10, weight: .bold))
+                                    Text(site.isPickingElements ? "Cancel" : "Zap…")
+                                        .font(.system(size: 12, weight: .semibold))
+                                }
+                                .foregroundStyle(site.isPickingElements ? Color(red: 0.42, green: 0.72, blue: 1.0) : ink)
+                                .padding(.horizontal, 11).padding(.vertical, 6)
+                                .background(.white.opacity(0.12), in: Capsule())
                             }.buttonStyle(.plain)
                         }
                         if site.isPickingElements {
-                            Text("Click elements on the page to hide them. Press Esc to exit.")
+                            Text("Click an element on the page to remove it. Esc to stop.")
                                 .font(.system(size: 11)).foregroundStyle(Color(red: 0.42, green: 0.72, blue: 1.0).opacity(0.9))
                         }
-                        if site.config.hiddenSelectors.isEmpty {
+                        if site.zapped.isEmpty {
                             if !site.isPickingElements {
-                                Text("Nothing hidden yet. Click any element on the page to hide it.")
+                                Text("Nothing zapped. Use Zap… and click anything on the page.")
                                     .font(.system(size: 11)).foregroundStyle(dim)
                             }
                         } else {
-                            ForEach(site.config.hiddenSelectors, id: \.self) { selector in
+                            ForEach(site.zapped) { item in
                                 HStack(spacing: 8) {
-                                    Text(selector)
+                                    Text(item.label)
                                         .font(.system(size: 11, design: .monospaced))
                                         .foregroundStyle(ink.opacity(0.85))
                                         .lineLimit(1).truncationMode(.middle)
                                     Spacer(minLength: 4)
-                                    let removeAction = {
-                                        site.removeHidden(selector)
-                                    }
                                     Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
                                         .foregroundStyle(.white.opacity(0.75))
                                         .frame(width: 20, height: 20)
@@ -4092,11 +4308,11 @@ private struct ConfigureWidgetOverlay: View {
                                             GeometryReader { proxy in
                                                 Color.clear
                                                     .onAppear {
-                                                        MenuHover.shared.setAction("uh:" + selector, removeAction)
-                                                        MenuHover.shared.register("uh:" + selector, proxy.frame(in: .global))
+                                                        MenuHover.shared.setAction("uz:" + item.id) { site.restoreZapped(item.id) }
+                                                        MenuHover.shared.register("uz:" + item.id, proxy.frame(in: .global))
                                                     }
                                                     .onChange(of: proxy.frame(in: .global)) { _, new in
-                                                        MenuHover.shared.register("uh:" + selector, new)
+                                                        MenuHover.shared.register("uz:" + item.id, new)
                                                     }
                                             }
                                         }
@@ -4104,21 +4320,14 @@ private struct ConfigureWidgetOverlay: View {
                                 .padding(.horizontal, 10).padding(.vertical, 8)
                                 .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
                                 .contentShape(RoundedRectangle(cornerRadius: 8))
-                                // Clicking anywhere on the row restores the element.
-                                .onTapGesture { site.removeHidden(selector) }
+                                .onTapGesture { site.restoreZapped(item.id) }
                             }
                             HStack {
                                 Spacer()
                                 Button {
-                                    let previous = site.config.hiddenSelectors
-                                    site.config.hiddenSelectors.removeAll()
-                                    debugLog("unhide all")
-                                    site.applyTuning(reload: false)
-                                    if let first = previous.first {
-                                        site.verifyUnhidden(first)
-                                    }
+                                    site.clearZapped()
                                 } label: {
-                                    Text("Clear all").font(.system(size: 11, weight: .semibold))
+                                    Text("Restore all").font(.system(size: 11, weight: .semibold))
                                         .foregroundStyle(dim)
                                         .padding(.horizontal, 8).padding(.vertical, 5)
                                         .contentShape(Rectangle())
