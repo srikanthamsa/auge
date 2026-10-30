@@ -284,6 +284,7 @@ final class WorkspaceInteractionView: NSView {
 
     private var eventMonitor: Any?
     private var dragStart: CGPoint?
+    private var swallowMouseUp = false
 
     override var isFlipped: Bool { true }
 
@@ -307,7 +308,13 @@ final class WorkspaceInteractionView: NSView {
                 debugLog("right down at \(point)")
                 self.onRightClick?(point); return nil
             case .leftMouseDown:
-                if MenuHover.shared.invoke(at: point) { return nil }
+                if MenuHover.shared.invoke(at: point) {
+                    // The action ran on mouse-down; swallow its mouse-up so a
+                    // control that appears under the pointer cannot act on the
+                    // release (that is what closed the config panel instantly).
+                    self.swallowMouseUp = true
+                    return nil
+                }
                 debugLog("left down at \(point) key=\(self.window?.isKeyWindow == true) active=\(NSApp.isActive) menuFrame=\(String(describing: self.contextMenuFrame?())) inMenu=\(self.contextMenuFrame?().map { $0.contains(point) } ?? false)")
                 if let menuFrame = self.contextMenuFrame?(), !menuFrame.contains(point) { self.onDismiss?(point) }
                 else if self.contextMenuFrame?() == nil { self.onDismiss?(point) }
@@ -322,6 +329,7 @@ final class WorkspaceInteractionView: NSView {
                 }
                 return event
             case .leftMouseUp:
+                if self.swallowMouseUp { self.swallowMouseUp = false; return nil }
                 if let start = self.dragStart {
                     let rect = CGRect(x: min(start.x, point.x), y: min(start.y, point.y),
                                      width: abs(point.x - start.x), height: abs(point.y - start.y))
@@ -1844,6 +1852,15 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     // MARK: Tuning
 
     /// Push the current configuration into the live web view.
+    /// Single path for restoring a zapped element: model, page, persistence.
+    func removeHidden(_ selector: String) {
+        config.hiddenSelectors.removeAll { $0 == selector }
+        MenuHover.shared.clear("uh:" + selector)
+        debugLog("unhide \(selector) remaining=\(config.hiddenSelectors.count)")
+        applyTuning(reload: false)
+        verifyUnhidden(selector)
+    }
+
     func applyTuning(reload: Bool) {
         guard let webView else { return }
         if config.darkMode {
@@ -4064,28 +4081,31 @@ private struct ConfigureWidgetOverlay: View {
                                         .foregroundStyle(ink.opacity(0.85))
                                         .lineLimit(1).truncationMode(.middle)
                                     Spacer(minLength: 4)
-                                    Button {
-                                        site.config.hiddenSelectors.removeAll { $0 == selector }
-                                        debugLog("unhide \(selector)")
-                                        site.applyTuning(reload: false)
-                                        let quoted = "\(selector.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'"))"
-                                        site.verifyUnhidden(selector)
-                                    } label: {
-                                        Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
-                                            .foregroundStyle(.white.opacity(0.6))
-                                            .frame(width: 18, height: 18)
-                                            .contentShape(Rectangle())
-                                    }.buttonStyle(.plain)
+                                    let removeAction = {
+                                        site.removeHidden(selector)
+                                    }
+                                    Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
+                                        .foregroundStyle(.white.opacity(0.75))
+                                        .frame(width: 20, height: 20)
+                                        .contentShape(Rectangle())
+                                        .background {
+                                            GeometryReader { proxy in
+                                                Color.clear
+                                                    .onAppear {
+                                                        MenuHover.shared.setAction("uh:" + selector, removeAction)
+                                                        MenuHover.shared.register("uh:" + selector, proxy.frame(in: .global))
+                                                    }
+                                                    .onChange(of: proxy.frame(in: .global)) { _, new in
+                                                        MenuHover.shared.register("uh:" + selector, new)
+                                                    }
+                                            }
+                                        }
                                 }
                                 .padding(.horizontal, 10).padding(.vertical, 8)
                                 .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
                                 .contentShape(RoundedRectangle(cornerRadius: 8))
                                 // Clicking anywhere on the row restores the element.
-                                .onTapGesture {
-                                    site.config.hiddenSelectors.removeAll { $0 == selector }
-                                    debugLog("unhide row \(selector)")
-                                    site.applyTuning(reload: false)
-                                }
+                                .onTapGesture { site.removeHidden(selector) }
                             }
                             HStack {
                                 Spacer()
