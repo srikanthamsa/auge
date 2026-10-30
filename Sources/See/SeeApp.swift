@@ -4445,6 +4445,10 @@ private struct AgendaTimelineView: View {
     private var allDay: [AgendaStore.Meeting] {
         store.meetings.filter { $0.allDay && cal.isDateInToday($0.start) }
     }
+    /// Anything still to come before midnight.
+    private var leftToday: [AgendaStore.Meeting] {
+        upcoming.filter { cal.isDateInToday($0.start) }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -4460,7 +4464,10 @@ private struct AgendaTimelineView: View {
                 } else if !upcoming.isEmpty {
                     nextUp
                 } else {
-                    placeholder("Nothing on the calendar")
+                    VStack(alignment: .leading, spacing: 10) {
+                        goodForToday
+                        placeholder("Nothing scheduled in the next two weeks")
+                    }
                 }
             }
         }
@@ -4511,10 +4518,24 @@ private struct AgendaTimelineView: View {
         }
     }
 
+    /// Shown when the rest of today is clear.
+    private var goodForToday: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 11.5))
+                .foregroundStyle(Color(red: 0.40, green: 0.82, blue: 0.52))
+            Text("You're good for today")
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundStyle(ink.opacity(0.82))
+                .lineLimit(2).minimumScaleFactor(0.8)
+        }
+    }
+
     /// Nothing in the next fourteen hours: show what is actually next, with the
     /// day it falls on, instead of an empty grid.
     private var nextUp: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if leftToday.isEmpty { goodForToday }
             Text("NEXT UP")
                 .font(.system(size: 9.5, weight: .semibold)).tracking(0.8)
                 .foregroundStyle(ink.opacity(0.35))
@@ -4716,10 +4737,17 @@ private final class TimerStore: ObservableObject {
 }
 
 @MainActor
+private final class TimerUI: ObservableObject {
+    @Published var showPresets = false
+}
+
+@MainActor
 private struct TimerView: View {
     @ObservedObject var widget: NativeWidgetSurface
     let ink: Color
     @StateObject private var store = TimerStore.shared
+    @StateObject private var ui = TimerUI()
+    private let presets = [1, 3, 5, 10, 15, 25, 45, 60]
 
     private var minutes: Double { Double(widget.note.trimmingCharacters(in: .whitespaces)) ?? 5 }
 
@@ -4744,20 +4772,35 @@ private struct TimerView: View {
                         .frame(width: 38, height: 30)
                         .background(.white.opacity(0.10), in: Capsule())
                 }.buttonStyle(.plain)
-                Menu {
-                    ForEach([1, 3, 5, 10, 15, 25, 45, 60], id: \.self) { value in
-                        Button("\(value) minutes") {
-                            widget.note = "\(value)"
-                            store.reset(widget.id, minutes: Double(value))
-                        }
-                    }
+                // A Menu cannot open inside See's non-activating panel, so the
+                // presets are ordinary buttons in a popover-shaped card.
+                Button {
+                    ui.showPresets.toggle()
                 } label: {
                     Text("\(Int(minutes)) min").font(.system(size: 12, weight: .semibold))
                         .padding(.horizontal, 11).frame(height: 30)
-                        .background(.white.opacity(0.10), in: Capsule())
-                }.menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
+                        .background(.white.opacity(ui.showPresets ? 0.22 : 0.10), in: Capsule())
+                }.buttonStyle(.plain)
             }
             .foregroundStyle(ink.opacity(0.9))
+            if ui.showPresets {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 4), spacing: 6) {
+                    ForEach(presets, id: \.self) { value in
+                        Button {
+                            widget.note = "\(value)"
+                            store.reset(widget.id, minutes: Double(value))
+                            ui.showPresets = false
+                        } label: {
+                            Text("\(value)")
+                                .font(.system(size: 11.5, weight: .medium)).monospacedDigit()
+                                .frame(maxWidth: .infinity).frame(height: 26)
+                                .background(.white.opacity(Int(minutes) == value ? 0.24 : 0.10),
+                                            in: RoundedRectangle(cornerRadius: 7))
+                        }.buttonStyle(.plain)
+                    }
+                }
+                .foregroundStyle(ink.opacity(0.85))
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -5228,9 +5271,17 @@ private final class WeatherStore: ObservableObject {
 // MARK: - World clock
 
 @MainActor
+private final class WorldClockUI: ObservableObject {
+    @Published var showZones = false
+}
+
+@MainActor
 private struct WorldClockView: View {
     @ObservedObject var widget: NativeWidgetSurface
     let ink: Color
+    /// Inline city picker. An NSMenu cannot open here — See's panel never becomes
+    /// the active app — so the list is drawn in the card with ordinary buttons.
+    @StateObject private var ui = WorldClockUI()
 
     private let zones: [(String, String)] = [
         ("San Francisco", "America/Los_Angeles"), ("New York", "America/New_York"),
@@ -5245,6 +5296,42 @@ private struct WorldClockView: View {
     }
 
     var body: some View {
+        Group {
+            if ui.showZones { zoneList } else { clock }
+        }
+    }
+
+    private var zoneList: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(zones, id: \.1) { zone in
+                    Button {
+                        widget.note = zone.1
+                        ui.showZones = false
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text(zone.0)
+                                .font(.system(size: 12, weight: zone.1 == selected.1 ? .semibold : .regular))
+                                .foregroundStyle(ink.opacity(zone.1 == selected.1 ? 0.95 : 0.62))
+                                .lineLimit(1)
+                            Spacer(minLength: 0)
+                            if zone.1 == selected.1 {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundStyle(ink.opacity(0.55))
+                            }
+                        }
+                        .padding(.vertical, 5)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var clock: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             VStack(alignment: .leading, spacing: 6) {
                 Text(selected.0)
@@ -5257,23 +5344,21 @@ private struct WorldClockView: View {
                     .monospacedDigit()
                     .tracking(-1)
                     .foregroundStyle(ink)
-                HStack {
+                HStack(spacing: 6) {
                     Text(dayString(context.date))
                         .font(.system(size: 10.5))
                         .foregroundStyle(ink.opacity(0.38))
-                    Spacer(minLength: 0)
-                    // Bottom-right, clear of the close badge.
-                    Menu {
-                        ForEach(zones, id: \.1) { zone in
-                            Button(zone.0) { widget.note = zone.1 }
-                        }
-                    } label: {
+                    // Inline with the day, on the leading side: both right-hand
+                    // corners belong to the close badge and the resize grip.
+                    Button { ui.showZones = true } label: {
                         Image(systemName: "ellipsis.circle")
-                            .font(.system(size: 12))
-                            .foregroundStyle(ink.opacity(0.4))
+                            .font(.system(size: 13))
+                            .foregroundStyle(ink.opacity(0.45))
+                            .frame(width: 20, height: 18)
+                            .contentShape(Rectangle())
                     }
-                    .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
-                    .frame(width: 18)
+                    .buttonStyle(.plain)
+                    Spacer(minLength: 0)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
