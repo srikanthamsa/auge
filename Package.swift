@@ -2,8 +2,8 @@
 import PackageDescription
 
 let package = Package(
-    name: "See",
+    name: "Auge",
     platforms: [.macOS(.v14)],
-    products: [.executable(name: "See", targets: ["See"])],
-    targets: [.executableTarget(name: "See")]
+    products: [.executable(name: "Auge", targets: ["Auge"])],
+    targets: [.executableTarget(name: "Auge", path: "Sources/Auge")]
 )

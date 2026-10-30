@@ -1,6 +1,6 @@
-# See — product brief
+# Auge — product brief
 
-See is a fast, personal information layer for macOS. A press-and-hold shortcut should show a calm, configurable workspace over the current task; releasing the shortcut or pressing Escape returns to the previous app.
+Auge is a fast, personal information layer for macOS. A press-and-hold shortcut should show a calm, configurable workspace over the current task; releasing the shortcut or pressing Escape returns to the previous app.
 
 ## Product principles
 
@@ -8,7 +8,7 @@ See is a fast, personal information layer for macOS. A press-and-hold shortcut s
 - Private by default: local-first data and explicit permission requests.
 - Cards are modular, reorderable, and individually refreshable.
 - Keyboard-first, with a visible menu bar fallback.
-- See adds actions and capture to Peek’s glanceable information model.
+- Auge adds actions and capture to Peek’s glanceable information model.
 
 ## v1 direction: Better Peek
 

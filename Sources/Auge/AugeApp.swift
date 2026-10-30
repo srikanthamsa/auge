@@ -19,7 +19,7 @@ extension Notification.Name {
 func debugLog(_ message: String) {
     let line = "\(Date().timeIntervalSince1970) \(message)\n"
     guard let data = line.data(using: .utf8) else { return }
-    let url = URL(fileURLWithPath: "/tmp/see-debug.log")
+    let url = URL(fileURLWithPath: "/tmp/auge-debug.log")
     if let handle = try? FileHandle(forWritingTo: url) {
         handle.seekToEndOfFile(); handle.write(data); try? handle.close()
     } else {
@@ -31,10 +31,10 @@ func debugLog(_ message: String) {
 
 @MainActor
 @main
-struct SeeApp {
+struct AugeApp {
     static func main() {
         let application = NSApplication.shared
-        let delegate = SeeAppDelegate()
+        let delegate = AugeAppDelegate()
         application.delegate = delegate
         application.run()
     }
@@ -43,7 +43,7 @@ struct SeeApp {
 // MARK: - App delegate (single status item)
 
 @MainActor
-private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
+private final class AugeAppDelegate: NSObject, NSApplicationDelegate {
     // Keep a single status item alive for the app lifetime.
     private var statusItem: NSStatusItem?
     private var panel: SeeOverlayPanel?
@@ -56,10 +56,10 @@ private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
         // Destroy any ghost items left by previous launches in the same process.
         guard statusItem == nil else { return }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem?.button?.image = NSImage(systemSymbolName: "eye", accessibilityDescription: "See")
+        statusItem?.button?.image = NSImage(systemSymbolName: "eye", accessibilityDescription: "Auge")
         statusItem?.button?.action = #selector(togglePanel)
         statusItem?.button?.target = self
-        statusItem?.button?.toolTip = "See — live workspace"
+        statusItem?.button?.toolTip = "AUGE — See beyond the window."
         PasskeyBridge.shared.start()
         AdBlocker.shared.prepare()
         showPanel()
@@ -72,7 +72,7 @@ private final class SeeAppDelegate: NSObject, NSApplicationDelegate {
         let appItem = NSMenuItem()
         main.addItem(appItem)
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "Quit See", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: "Quit Auge", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
 
         let editItem = NSMenuItem()
@@ -1289,7 +1289,19 @@ private enum WorkspaceStore {
     static var directory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory())
-        return base.appendingPathComponent("See", isDirectory: true)
+        let dir = base.appendingPathComponent("Auge", isDirectory: true)
+        // Rebranded from See: bring the old workspace across the first time.
+        let legacy = base.appendingPathComponent("See", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: dir.path),
+           FileManager.default.fileExists(atPath: legacy.path) {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            if let items = try? FileManager.default.contentsOfDirectory(at: legacy, includingPropertiesForKeys: nil) {
+                for item in items {
+                    try? FileManager.default.copyItem(at: item, to: dir.appendingPathComponent(item.lastPathComponent))
+                }
+            }
+        }
+        return dir
     }
     static var fileURL: URL { directory.appendingPathComponent("workspace.json") }
 
@@ -2918,23 +2930,24 @@ private struct WebsiteView: NSViewRepresentable {
     final class Coordinator { var lastRequestID = -1 }
 }
 
-/// The loading beam: one light that runs the length of the card's bottom edge as
-/// the page loads. Thin at the tail, thickening into a bright ray at the head,
-/// coloured red → blue → white from tail to head, and always pointing the way
-/// the load is going. It makes a single pass per load and then fades.
+/// The loading beam: a thick band of light pinned to the card's bottom edge,
+/// thin at the tail and swelling into a bright head that runs ahead of the
+/// streak lines behind it — a bullet train seen from the side. One pass per
+/// load, red at the tail through blue to a white head.
 ///
-/// AppKit rather than SwiftUI: overlays paint under a WKWebView, so a SwiftUI
-/// version never showed.
+/// AppKit rather than SwiftUI: overlays paint under a WKWebView.
 @MainActor
 private final class PageLoadBeamView: NSView {
     private let rail = CALayer()
     private let container = CALayer()
     private let gradient = CAGradientLayer()
     private let wedge = CAShapeLayer()
+    private let head = CALayer()
+
     private var progress: Double = 0
     private var lastProgress: Double = 0
 
-    private static let red = NSColor(calibratedRed: 1.0, green: 0.21, blue: 0.17, alpha: 1)
+    private static let red = NSColor(calibratedRed: 1.0, green: 0.20, blue: 0.16, alpha: 1)
     private static let blue = NSColor(calibratedRed: 0.16, green: 0.44, blue: 1.0, alpha: 1)
 
     override var isFlipped: Bool { true }
@@ -2944,13 +2957,11 @@ private final class PageLoadBeamView: NSView {
         wantsLayer = true
         layer?.masksToBounds = false
 
-        rail.backgroundColor = NSColor.white.withAlphaComponent(0.10).cgColor
+        rail.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
         layer?.addSublayer(rail)
 
         container.anchorPoint = CGPoint(x: 0, y: 0.5)
         container.masksToBounds = false
-        // Start empty: otherwise the first progress update animates the beam
-        // from full width back to the left, which read as "it starts on the right".
         container.transform = CATransform3DMakeScale(0.0001, 1, 1)
         layer?.addSublayer(container)
 
@@ -2959,13 +2970,21 @@ private final class PageLoadBeamView: NSView {
         gradient.colors = [PageLoadBeamView.red.cgColor,
                            PageLoadBeamView.blue.cgColor,
                            NSColor.white.cgColor]
-        gradient.locations = [0, 0.55, 1]
+        gradient.locations = [0, 0.62, 1]
         gradient.mask = wedge
         gradient.shadowColor = NSColor.white.cgColor
-        gradient.shadowOpacity = 1
+        gradient.shadowOpacity = 0.85
         gradient.shadowOffset = .zero
         gradient.masksToBounds = false
         container.addSublayer(gradient)
+
+        // The head is a sibling of the scaled body so it stays round.
+        head.backgroundColor = NSColor.white.cgColor
+        head.shadowColor = NSColor.white.cgColor
+        head.shadowOpacity = 1
+        head.shadowOffset = .zero
+        head.masksToBounds = false
+        layer?.addSublayer(head)
 
         alphaValue = 0
     }
@@ -2973,9 +2992,7 @@ private final class PageLoadBeamView: NSView {
 
     func update(progress value: Double, active: Bool) {
         let next = min(max(value, 0), 1)
-        // A new load restarts at zero: jump there instead of animating the beam
-        // backwards from where the last load finished.
-        let restarting = next < lastProgress - 0.02 || (active && progress >= 0.99)
+        let restarting = next < lastProgress - 0.02
         progress = next
         lastProgress = next
         layoutLayers(animate: !restarting)
@@ -2991,55 +3008,87 @@ private final class PageLoadBeamView: NSView {
     override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); layoutLayers(animate: false) }
     override func layout() { super.layout(); layoutLayers(animate: false) }
 
-    private var beamHeight: CGFloat { min(9, max(6, bounds.height * 0.75)) }
-
     private func layoutLayers(animate: Bool) {
-        guard bounds.width > 0 else { return }
-        let height = beamHeight
-        let lineY = bounds.height - height / 2
+        guard bounds.width > 0, bounds.height > 1 else { return }
         let width = bounds.width
+        let height = bounds.height - 1        // the band sits on the last pixel
+        let bottom = bounds.height
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        rail.frame = CGRect(x: 0, y: bounds.height - 1, width: width, height: 1)
+        rail.frame = CGRect(x: 0, y: bottom - 1, width: width, height: 1)
         CATransaction.commit()
 
-        // The wedge is built for the full width and then squashed horizontally,
-        // so its head keeps its shape and the gradient stays red → white across
-        // whatever has been revealed so far.
-        let wedgePath = taperPath(width: width, height: height)
-        let scale = max(0.0001, CGFloat(progress))
+        let radius = height * 0.36
         CATransaction.begin()
         CATransaction.setDisableActions(!animate)
-        CATransaction.setAnimationDuration(0.3)
+        CATransaction.setAnimationDuration(0.32)
         CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeOut))
         container.bounds = CGRect(x: 0, y: 0, width: width, height: height)
-        container.position = CGPoint(x: 0, y: lineY)
-        container.anchorPoint = CGPoint(x: 0, y: 0.5)
-        container.transform = CATransform3DMakeScale(scale, 1, 1)
+        container.position = CGPoint(x: 0, y: bottom - height / 2)
+        container.transform = CATransform3DMakeScale(max(0.0001, CGFloat(progress)), 1, 1)
         gradient.frame = CGRect(x: 0, y: 0, width: width, height: height)
         wedge.frame = CGRect(x: 0, y: 0, width: width, height: height)
-        wedge.path = wedgePath
-        gradient.shadowRadius = height * 1.1
+        wedge.path = bandPath(width: width, height: height)
+        gradient.shadowRadius = height * 0.35
+
+        head.bounds = CGRect(x: 0, y: 0, width: radius * 2, height: radius * 2)
+        head.cornerRadius = radius
+        head.shadowRadius = radius * 3.0
+        head.position = CGPoint(x: CGFloat(progress) * width - radius * 0.15,
+                                y: bottom - height * 0.50)
         CATransaction.commit()
+        startPulse()
     }
 
-    /// Hair-thin tail, body widening, rounded head.
-    private func taperPath(width: CGFloat, height: CGFloat) -> CGPath {
-        let mid = height / 2
-        let tailHalf: CGFloat = 0.5
-        let bodyHalf = mid * 0.62
-        let shoulder = width * 0.72
+    /// Body plus two streak lines trailing behind the head.
+    private func bandPath(width: CGFloat, height: CGFloat) -> CGPath {
         let path = CGMutablePath()
-        path.move(to: CGPoint(x: 0, y: mid - tailHalf))
-        path.addLine(to: CGPoint(x: shoulder, y: mid - bodyHalf))
-        path.addQuadCurve(to: CGPoint(x: width, y: mid),
-                          control: CGPoint(x: width * 0.92, y: mid - bodyHalf * 1.35))
-        path.addQuadCurve(to: CGPoint(x: shoulder, y: mid + bodyHalf),
-                          control: CGPoint(x: width * 0.92, y: mid + bodyHalf * 1.35))
-        path.addLine(to: CGPoint(x: 0, y: mid + tailHalf))
+        let top = height * 0.30          // thinnest point of the body, at the tail
+        let neck = height * 0.62         // how far the body rises before the head
+        // Body: flat along the bottom edge, swelling towards the head.
+        path.move(to: CGPoint(x: 0, y: height))
+        path.addLine(to: CGPoint(x: width, y: height))
+        path.addLine(to: CGPoint(x: width, y: height * 0.42))
+        path.addQuadCurve(to: CGPoint(x: width * 0.80, y: height * 0.16),
+                          control: CGPoint(x: width * 0.94, y: height * 0.12))
+        path.addQuadCurve(to: CGPoint(x: width * 0.45, y: neck),
+                          control: CGPoint(x: width * 0.62, y: height * 0.30))
+        path.addLine(to: CGPoint(x: 0, y: top))
         path.closeSubpath()
+
+        // Streaks: thin lines above the body that fade towards the tail.
+        func streak(from: CGFloat, to: CGFloat, y: CGFloat, thickness: CGFloat) {
+            let sub = CGMutablePath()
+            sub.move(to: CGPoint(x: width * from, y: y))
+            sub.addLine(to: CGPoint(x: width * to, y: y))
+            sub.addLine(to: CGPoint(x: width * to, y: y + thickness))
+            sub.addLine(to: CGPoint(x: width * from, y: y + thickness * 0.45))
+            sub.closeSubpath()
+            path.addPath(sub)
+        }
+        streak(from: 0.16, to: 0.86, y: height * 0.24, thickness: max(1.4, height * 0.10))
+        streak(from: 0.34, to: 0.90, y: height * 0.06, thickness: max(1.1, height * 0.07))
         return path
+    }
+
+    private func startPulse() {
+        guard head.animation(forKey: "pulse") == nil else { return }
+        let pulse = CABasicAnimation(keyPath: "opacity")
+        pulse.fromValue = 0.55
+        pulse.toValue = 1.0
+        pulse.duration = 0.42
+        pulse.autoreverses = true
+        pulse.repeatCount = .infinity
+        pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        head.add(pulse, forKey: "pulse")
+        let breathe = CABasicAnimation(keyPath: "transform.scale")
+        breathe.fromValue = 0.88
+        breathe.toValue = 1.08
+        breathe.duration = 0.42
+        breathe.autoreverses = true
+        breathe.repeatCount = .infinity
+        head.add(breathe, forKey: "breathe")
     }
 }
 
@@ -3294,7 +3343,7 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
 
     override func layout() {
         super.layout(); webView.frame = bounds; handles.frame = bounds; handles.needsDisplay = true
-        let beamHeight = max(8, bounds.height * 0.02)
+        let beamHeight = min(30, max(18, bounds.height * 0.035))
         beam.frame = CGRect(x: 0, y: bounds.height - beamHeight, width: bounds.width, height: beamHeight)
     }
 
@@ -3848,7 +3897,7 @@ private final class AdBlocker: ObservableObject {
     private static var cacheURL: URL? {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
         guard let base else { return nil }
-        let dir = base.appendingPathComponent("See", isDirectory: true)
+        let dir = base.appendingPathComponent("Auge", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("adblock-v\(cacheVersion).json")
     }
@@ -4479,7 +4528,7 @@ private struct SeeOverlay: View {
                         .foregroundStyle(.secondary)
                         .frame(width: 34, height: 34)
                         .contentShape(Circle())
-                }.buttonStyle(.plain).help("Close See")
+                }.buttonStyle(.plain).help("Close Auge")
             }
         }.foregroundStyle(white)
     }
@@ -4991,7 +5040,7 @@ private struct AgendaTimelineView: View {
             case .pending:
                 placeholder("Looking at your calendars…")
             case .denied:
-                placeholder("Calendar access is off.\nSystem Settings › Privacy & Security › Calendars › See")
+                placeholder("Calendar access is off.\nSystem Settings › Privacy & Security › Calendars › Auge")
             default:
                 if !inTimeline.isEmpty {
                     timeline
@@ -6523,7 +6572,7 @@ private struct WorkspaceOptionsOverlay: View {
     let onClose: () -> Void
 
     private var title: String {
-        switch panel { case .background: "Customize Background"; case .settings: "See Settings" }
+        switch panel { case .background: "Customize Background"; case .settings: "Auge Settings" }
     }
 
     var body: some View {
@@ -6568,7 +6617,7 @@ private struct WorkspaceOptionsOverlay: View {
                     }
                     .padding(.top, 4)
                 case .settings:
-                    Text("See keeps your websites and widgets in a freeform workspace.")
+                    Text("AUGE — See beyond the window.\nWebsites, files and widgets in a freeform workspace.")
                         .font(.system(size: 12)).foregroundStyle(.white.opacity(0.65))
                 }
             }
@@ -6749,7 +6798,7 @@ private struct ConfigureWidgetOverlay: View {
                     }
                     divider
 
-                    settingRow("Remember Scroll Position", info: "Restores where you were scrolled to when the widget reloads or See reopens.") {
+                    settingRow("Remember Scroll Position", info: "Restores where you were scrolled to when the widget reloads or Auge reopens.") {
                         Toggle("", isOn: Binding(
                             get: { site.config.rememberScroll },
                             set: { site.config.rememberScroll = $0 }

@@ -1,6 +1,8 @@
-# See
+# Auge
 
-Native macOS prototype for a glanceable personal information layer.
+**AUGE — See beyond the window.**
+
+Native macOS workspace for websites, files and widgets, one keystroke away.
 
 ## Build
 
@@ -8,7 +10,7 @@ Requires macOS 14+ and a Swift toolchain with the macOS SDK. From this directory
 
 ```sh
 swift build
-swift run See
+swift run Auge
 ```
 
 The app launches into a full-screen dimmed workspace with a quick fade. Website surfaces show the page without browser chrome. Use **Add** to open a URL or add a Clock, Calendar, or Quick Note. Hover near the bottom center to reveal the move bar; hover at the bottom-right corner to reveal the rounded resize grip. Drag on empty space to open the Add picker for the rectangle you drew. Right-click the empty workspace for **Tidy Layout** — which packs every surface into the free space, largest first, shrinking only when it must, so nothing overlaps — **Customize Background…** (ten palettes plus glow and dim sliders), Tidy Layout, Settings, or Remove All. Press Escape to close the topmost thing first — the picker, a menu, the background panel, or the website picker — and Escape again to dismiss See; click its menu bar eye to reopen it.
