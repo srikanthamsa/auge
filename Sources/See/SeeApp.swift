@@ -2892,24 +2892,24 @@ private struct WebsiteView: NSViewRepresentable {
     final class Coordinator { var lastRequestID = -1 }
 }
 
-/// The loading beam. It lives in AppKit rather than as a SwiftUI overlay: a
-/// WKWebView is an NSView, and SwiftUI content layered over one gets painted
-/// under it, so the beam would never be visible.
+/// The loading beam: a straight light that sweeps the bottom edge while a page
+/// loads. It tapers like a bullet train seen from the side — hair-thin at the
+/// tail, thickening towards a bright head with a halo — and runs red → blue →
+/// white from tail to head.
 ///
-/// The beam sweeps left to right on its own clock for as long as the page is
-/// fetching — tying it to `estimatedProgress` made it freeze or jump to the
-/// right edge, because WebKit reports progress in a handful of big steps. The
-/// faint rail underneath does show the real fraction.
+/// AppKit rather than SwiftUI: overlays paint under a WKWebView, so a SwiftUI
+/// version never showed. The sweep is driven by the layer, not by progress,
+/// because WebKit reports progress in a few big steps and the beam froze.
 @MainActor
 private final class PageLoadBeamView: NSView {
     private let rail = CALayer()
-    private let fill = CAGradientLayer()
     private let beam = CAGradientLayer()
-    private let glow = CAGradientLayer()
+    private let wedge = CAShapeLayer()
     private var progress: Double = 0
 
-    private static let cyan = NSColor(calibratedRed: 0.36, green: 0.85, blue: 1.0, alpha: 1)
-    private static let violet = NSColor(calibratedRed: 0.72, green: 0.45, blue: 1.0, alpha: 1)
+    private static let red = NSColor(calibratedRed: 1.0, green: 0.23, blue: 0.19, alpha: 1)
+    private static let blue = NSColor(calibratedRed: 0.18, green: 0.42, blue: 1.0, alpha: 1)
+    private static let cyan = NSColor(calibratedRed: 0.45, green: 0.85, blue: 1.0, alpha: 1)
 
     override var isFlipped: Bool { true }
 
@@ -2918,44 +2918,24 @@ private final class PageLoadBeamView: NSView {
         wantsLayer = true
         layer?.masksToBounds = false
 
-        rail.backgroundColor = NSColor.white.withAlphaComponent(0.07).cgColor
+        rail.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
         layer?.addSublayer(rail)
 
-        fill.startPoint = CGPoint(x: 0, y: 0.5)
-        fill.endPoint = CGPoint(x: 1, y: 0.5)
-        fill.colors = [PageLoadBeamView.cyan.withAlphaComponent(0.55).cgColor,
-                       PageLoadBeamView.violet.withAlphaComponent(0.55).cgColor]
-        fill.cornerRadius = 1
-        layer?.addSublayer(fill)
-
-        let stops = [
-            NSColor.clear.cgColor,
-            PageLoadBeamView.cyan.withAlphaComponent(0.15).cgColor,
-            PageLoadBeamView.cyan.cgColor,
-            NSColor.white.cgColor,
-            PageLoadBeamView.violet.cgColor,
-            PageLoadBeamView.violet.withAlphaComponent(0.25).cgColor,
-            NSColor.clear.cgColor
-        ]
+        // The beam is a gradient clipped to a tapered wedge.
         beam.startPoint = CGPoint(x: 0, y: 0.5)
         beam.endPoint = CGPoint(x: 1, y: 0.5)
-        beam.colors = stops
-        beam.locations = [0, 0.25, 0.42, 0.58, 0.74, 0.86, 1]
-        beam.shadowColor = PageLoadBeamView.cyan.cgColor
+        beam.colors = [PageLoadBeamView.red.cgColor,
+                       PageLoadBeamView.blue.cgColor,
+                       NSColor.white.cgColor]
+        beam.locations = [0, 0.62, 1]
+        beam.mask = wedge
+        beam.shadowColor = NSColor.white.cgColor
         beam.shadowOpacity = 1
-        beam.shadowRadius = 9
+        beam.shadowRadius = 7
         beam.shadowOffset = .zero
         beam.masksToBounds = false
         layer?.addSublayer(beam)
 
-        // A wider, fainter copy gives the light a halo that reads on light pages.
-        glow.startPoint = beam.startPoint
-        glow.endPoint = beam.endPoint
-        glow.colors = stops
-        glow.locations = [0, 0.30, 0.45, 0.60, 0.75, 0.88, 1]
-        glow.opacity = 0.55
-        glow.masksToBounds = false
-        layer?.insertSublayer(glow, below: beam)
         alphaValue = 0
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -2963,57 +2943,67 @@ private final class PageLoadBeamView: NSView {
     func update(progress value: Double, active: Bool) {
         progress = min(max(value, 0), 1)
         layoutLayers()
-        // Restarting on every progress tick pinned the beam to the left edge.
         if active, beam.animation(forKey: "sweep") == nil { startSweep() }
         let target: CGFloat = active ? 1 : 0
         guard abs(alphaValue - target) > 0.01 else { return }
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = active ? 0.16 : 0.34
+            context.duration = active ? 0.14 : 0.30
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             animator().alphaValue = target
         }
     }
 
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        layoutLayers()
-    }
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); layoutLayers() }
+    override func layout() { super.layout(); layoutLayers() }
 
-    override func layout() {
-        super.layout()
-        layoutLayers()
-    }
-
-    private var beamWidth: CGFloat { max(70, bounds.width * 0.22) }
+    private var beamWidth: CGFloat { max(110, bounds.width * 0.34) }
+    private var beamHeight: CGFloat { min(7, max(4.5, bounds.height * 0.6)) }
 
     private func layoutLayers() {
         guard bounds.width > 0 else { return }
-        let height = bounds.height
-        let lineY = height - 2
+        let lineY = bounds.height - 1.5
+        let width = beamWidth
+        let height = beamHeight
         CATransaction.begin(); CATransaction.setDisableActions(true)
         rail.frame = CGRect(x: 0, y: lineY, width: bounds.width, height: 1)
-        fill.frame = CGRect(x: 0, y: lineY - 0.5, width: bounds.width * CGFloat(progress), height: 2)
-        beam.frame = CGRect(x: 0, y: lineY - 2, width: beamWidth, height: 3)
-        beam.cornerRadius = 1.5
-        glow.frame = CGRect(x: 0, y: lineY - 7, width: beamWidth, height: 13)
+        beam.frame = CGRect(x: 0, y: lineY - height + 1, width: width, height: height)
+        beam.shadowRadius = height * 1.6
+        wedge.frame = CGRect(x: 0, y: 0, width: width, height: height)
+        wedge.path = taperPath(width: width, height: height)
         CATransaction.commit()
         if alphaValue > 0, beam.animation(forKey: "sweep") == nil { startSweep() }
+    }
+
+    /// Thin tail, thickening body, rounded head.
+    private func taperPath(width: CGFloat, height: CGFloat) -> CGPath {
+        let mid = height / 2
+        let tailHalf: CGFloat = 0.45
+        let bodyHalf = mid * 0.52
+        let shoulder = width * 0.70
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: 0, y: mid - tailHalf))
+        path.addLine(to: CGPoint(x: shoulder, y: mid - bodyHalf))
+        path.addQuadCurve(to: CGPoint(x: width, y: mid),
+                          control: CGPoint(x: width * 0.90, y: mid - bodyHalf * 1.5))
+        path.addQuadCurve(to: CGPoint(x: shoulder, y: mid + bodyHalf),
+                          control: CGPoint(x: width * 0.90, y: mid + bodyHalf * 1.5))
+        path.addLine(to: CGPoint(x: 0, y: mid + tailHalf))
+        path.closeSubpath()
+        return path
     }
 
     private func startSweep() {
         guard bounds.width > 0 else { return }
         let width = beamWidth
         let animation = CABasicAnimation(keyPath: "position.x")
-        animation.fromValue = -width / 2
-        animation.toValue = bounds.width + width / 2
-        animation.duration = 1.25
+        animation.fromValue = -width * 0.35
+        animation.toValue = bounds.width + width * 0.65
+        animation.duration = 1.35
         animation.repeatCount = .infinity
         animation.timingFunction = CAMediaTimingFunction(name: .linear)
         animation.isRemovedOnCompletion = false
         beam.removeAnimation(forKey: "sweep")
         beam.add(animation, forKey: "sweep")
-        glow.removeAnimation(forKey: "sweep")
-        glow.add(animation, forKey: "sweep")
     }
 }
 
@@ -3340,19 +3330,24 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
         debugLog("site drag \(h) dx=\(dx) dy=\(dy) startSize=\(startSize)")
         var tx = Transaction(); tx.animation = nil
         withTransaction(tx) {
-            if h == .move { site.center = CGPoint(x: startCenter.x + dx, y: startCenter.y + dy) }
+            if h == .move {
+                let desired = CGPoint(x: startCenter.x + dx, y: startCenter.y + dy)
+                site.center = AlignmentGuides.shared.snap(center: desired, size: site.size, excluding: site.id)
+            }
             else {
                 // Honour the real minimum: the old hard-coded 480x360 floor
                 // snapped any card already smaller than that back up, which made
                 // the corner feel dead.
                 let floor = websiteMinSize
-                site.size = CGSize(width: max(floor.width, startSize.width + dx),
-                                   height: max(floor.height, startSize.height + dy))
+                let desired = CGSize(width: max(floor.width, startSize.width + dx),
+                                     height: max(floor.height, startSize.height + dy))
+                site.size = AlignmentGuides.shared.snap(size: desired, center: site.center, excluding: site.id)
             }
         }
     }
 
     override func mouseUp(with event: NSEvent) {
+        AlignmentGuides.shared.clear()
         if activeClose { activeClose = false; onClose?(); return }
         activeHandle = nil; handles.needsDisplay = true
     }
@@ -3692,6 +3687,121 @@ private struct PlacedWidgetView: View {
 }
 
 
+// MARK: - Alignment guides
+
+/// Peek-style cue lines while a surface is dragged or resized: when an edge or
+/// centre comes within a few points of another surface's, the surface snaps and
+/// the matching line is drawn across the workspace.
+@MainActor
+private final class AlignmentGuides: ObservableObject {
+    static let shared = AlignmentGuides()
+
+    @Published private(set) var verticals: [CGFloat] = []
+    @Published private(set) var horizontals: [CGFloat] = []
+
+    weak var model: OverlayModel?
+
+    private let threshold: CGFloat = 6
+
+    func clear() {
+        if !verticals.isEmpty { verticals = [] }
+        if !horizontals.isEmpty { horizontals = [] }
+    }
+
+    private func otherRects(excluding id: UUID) -> [CGRect] {
+        guard let model else { return [] }
+        var rects: [CGRect] = []
+        for site in model.websites where site.id != id {
+            rects.append(CGRect(x: site.center.x - site.size.width / 2,
+                                y: site.center.y - site.size.height / 2,
+                                width: site.size.width, height: site.size.height))
+        }
+        for widget in model.widgets where widget.id != id {
+            rects.append(CGRect(x: widget.center.x - widget.size.width / 2,
+                                y: widget.center.y - widget.size.height / 2,
+                                width: widget.size.width, height: widget.size.height))
+        }
+        return rects
+    }
+
+    /// Nearest alignment for one axis, if any is within the threshold.
+    private func bestAlignment(mine: [CGFloat], targets: [CGFloat]) -> (delta: CGFloat, line: CGFloat)? {
+        var best: (delta: CGFloat, line: CGFloat)?
+        for target in targets {
+            for value in mine {
+                let delta = target - value
+                guard abs(delta) <= threshold else { continue }
+                if best == nil || abs(delta) < abs(best!.delta) { best = (delta, target) }
+            }
+        }
+        return best
+    }
+
+    /// Moving: snap any edge or the centre on either axis.
+    func snap(center desired: CGPoint, size: CGSize, excluding id: UUID) -> CGPoint {
+        let rects = otherRects(excluding: id)
+        guard !rects.isEmpty else { clear(); return desired }
+        var center = desired
+        let halfW = size.width / 2, halfH = size.height / 2
+        let x = bestAlignment(mine: [center.x - halfW, center.x, center.x + halfW],
+                             targets: rects.flatMap { [$0.minX, $0.midX, $0.maxX] })
+        let y = bestAlignment(mine: [center.y - halfH, center.y, center.y + halfH],
+                              targets: rects.flatMap { [$0.minY, $0.midY, $0.maxY] })
+        if let x { center.x += x.delta }
+        if let y { center.y += y.delta }
+        verticals = x.map { [$0.line] } ?? []
+        horizontals = y.map { [$0.line] } ?? []
+        return center
+    }
+
+    /// Resizing from the bottom-right: snap only the edges being dragged, so the
+    /// anchored corner never jumps.
+    func snap(size desired: CGSize, center: CGPoint, excluding id: UUID) -> CGSize {
+        let rects = otherRects(excluding: id)
+        guard !rects.isEmpty else { clear(); return desired }
+        var size = desired
+        let right = center.x + size.width / 2
+        let bottom = center.y + size.height / 2
+        let x = bestAlignment(mine: [right], targets: rects.flatMap { [$0.minX, $0.midX, $0.maxX] })
+        let y = bestAlignment(mine: [bottom], targets: rects.flatMap { [$0.minY, $0.midY, $0.maxY] })
+        if let x { size.width = max(40, size.width + x.delta) }
+        if let y { size.height = max(40, size.height + y.delta) }
+        verticals = x.map { [$0.line] } ?? []
+        horizontals = y.map { [$0.line] } ?? []
+        return size
+    }
+}
+
+/// The cue lines themselves: hair-thin cyan, with a little bloom so they read
+/// over photographs as well as dark pages.
+private struct AlignmentGuideOverlay: View {
+    @ObservedObject var guides = AlignmentGuides.shared
+
+    private var color: Color { Color(red: 0.40, green: 0.86, blue: 1.0) }
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .topLeading) {
+                ForEach(Array(guides.verticals.enumerated()), id: \.offset) { _, x in
+                    Rectangle()
+                        .fill(color.opacity(0.85))
+                        .frame(width: 1, height: geo.size.height)
+                        .shadow(color: color.opacity(0.9), radius: 4)
+                        .position(x: x, y: geo.size.height / 2)
+                }
+                ForEach(Array(guides.horizontals.enumerated()), id: \.offset) { _, y in
+                    Rectangle()
+                        .fill(color.opacity(0.85))
+                        .frame(width: geo.size.width, height: 1)
+                        .shadow(color: color.opacity(0.9), radius: 4)
+                        .position(x: geo.size.width / 2, y: y)
+                }
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
 // MARK: - Root overlay
 
 @MainActor
@@ -3759,6 +3869,9 @@ private struct SeeOverlay: View {
                             removal: .opacity.combined(with: .scale(scale: 0.92))))
                 }
 
+                AlignmentGuideOverlay()
+                    .zIndex(58)
+
                 // Transient message, e.g. when a tidy cannot fit locked sizes
                 if let toast = model.toast {
                     ToastBanner(message: toast)
@@ -3793,6 +3906,8 @@ private struct SeeOverlay: View {
                     .zIndex(100)
             }
             .frame(width: size.width, height: size.height)
+            .onAppear { AlignmentGuides.shared.model = model }
+            .onChange(of: model.websites.count) { AlignmentGuides.shared.model = model }
             .background {
                 WorkspaceInteractionMonitor(
                     onRightClick: { pt in
@@ -4385,17 +4500,21 @@ private final class WidgetDragView: NSView {
         let dx = loc.x - dragStart.x; let dy = dragStart.y - loc.y
         // Direct, unanimated model writes. Implicit springs were making the
         // widget trail the pointer and leave ghost frames behind.
-        if h == .move { w.center = CGPoint(x: startCenter.x + dx, y: startCenter.y + dy) }
-        else {
+        if h == .move {
+            let desired = CGPoint(x: startCenter.x + dx, y: startCenter.y + dy)
+            w.center = AlignmentGuides.shared.snap(center: desired, size: w.size, excluding: w.id)
+        } else {
             let floor = w.kind.minSize
-            w.size = CGSize(width: max(floor.width, startSize.width + dx),
-                            height: max(floor.height, startSize.height + dy))
+            let desired = CGSize(width: max(floor.width, startSize.width + dx),
+                                 height: max(floor.height, startSize.height + dy))
+            w.size = AlignmentGuides.shared.snap(size: desired, center: w.center, excluding: w.id)
         }
     }
 
     override func mouseUp(with event: NSEvent) {
         activeHandle = nil
         widget?.isDragging = false
+        AlignmentGuides.shared.clear()
         // If the drag carried the widget away from the pointer, the tracking
         // area never sent an exit; clear the hover chrome explicitly.
         let local = convert(event.locationInWindow, from: nil)
