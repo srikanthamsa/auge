@@ -718,8 +718,15 @@ private final class OverlayModel: ObservableObject {
     }
 
     func remove(_ site: WebsiteSurface) {
+        let center = site.center
         withAnimation(.easeInOut(duration: 0.22)) { websites.removeAll { $0.id == site.id } }
         focusedID = websites.last?.id
+        offerUndo(at: center, inserted: websites.count) { [weak self] in
+            guard let self else { return }
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                self.websites.insert(site, at: min(self.undoInsertIndex, self.websites.count))
+            }
+        }
     }
 
     func addWidget(_ kind: NativeWidgetKind, center: CGPoint) {
@@ -728,7 +735,46 @@ private final class OverlayModel: ObservableObject {
     }
 
     func removeWidget(_ widget: NativeWidgetSurface) {
+        let center = widget.center
+        let index = widgets.firstIndex(where: { $0.id == widget.id }) ?? widgets.count
         withAnimation(.easeInOut(duration: 0.22)) { widgets.removeAll { $0.id == widget.id } }
+        offerUndo(at: center, inserted: index) { [weak self] in
+            guard let self else { return }
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                self.widgets.insert(widget, at: min(self.undoInsertIndex, self.widgets.count))
+            }
+        }
+    }
+
+    // MARK: Undo a removal
+
+    struct UndoOffer: Identifiable {
+        let id = UUID()
+        let center: CGPoint
+        let perform: () -> Void
+    }
+
+    @Published var undoOffer: UndoOffer?
+    private var undoInsertIndex = 0
+    private var undoTimer: Timer?
+
+    private func offerUndo(at center: CGPoint, inserted index: Int, restore: @escaping () -> Void) {
+        undoInsertIndex = index
+        undoTimer?.invalidate()
+        undoTimer = nil
+        undoOffer = UndoOffer(center: center, perform: restore)
+        debugLog("undo offer shown")
+    }
+
+    func expireUndo(_ id: UUID) {
+        if undoOffer?.id == id { undoOffer = nil }
+    }
+
+    func performUndo() {
+        guard let offer = undoOffer else { return }
+        undoOffer = nil
+        undoTimer?.invalidate()
+        offer.perform()
     }
 
     /// Packs every surface into the free workspace without overlaps: large
@@ -744,7 +790,8 @@ private final class OverlayModel: ObservableObject {
         }
 
         var items: [Item] = websites.enumerated().map {
-            Item(isWidget: false, index: $0.offset, locked: false, size: $0.element.size, center: .zero)
+            Item(isWidget: false, index: $0.offset, locked: $0.element.sizeLocked,
+                 size: $0.element.size, center: .zero)
         }
         items += widgets.enumerated().map {
             Item(isWidget: true, index: $0.offset, locked: $0.element.sizeLocked,
@@ -1085,6 +1132,7 @@ private struct WebsiteSnapshot: Codable {
     var x: Double, y: Double, w: Double, h: Double
     var config: WebsiteConfig
     var scrollY: Double
+    var sizeLocked: Bool?
 }
 
 private struct WidgetSnapshot: Codable {
@@ -2234,6 +2282,8 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     @Published var isPickingElements = false
     /// Stacking order: the surface touched last carries the highest value.
     @Published var z: Double = 0
+    /// Tidy keeps a locked site's size; only its position may change.
+    @Published var sizeLocked = false
     /// Elements the page itself has zapped, mirrored here for the config panel.
     @Published private(set) var zapped: [ZappedSummary] = []
     /// Cursor the page itself wants at the last probed point (`pointer`, `text`…).
@@ -2258,7 +2308,7 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     var snapshot: WebsiteSnapshot {
         WebsiteSnapshot(id: id, address: address, title: title,
                         x: center.x, y: center.y, w: size.width, h: size.height,
-                        config: config, scrollY: scrollY)
+                        config: config, scrollY: scrollY, sizeLocked: sizeLocked)
     }
 
     func navigate() {
@@ -2657,15 +2707,20 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
         // callback, for instance) has already handed control back to the opener;
         // leaving it on screen is the white sheet people see after a failed
         // login. Close it once we know it is blank.
+        // Only the identity callback page is safe to drop: closing a real page
+        // would break the flow the opener is still waiting on.
+        let url = webView.url?.absoluteString ?? ""
+        let isCallback = url.contains("gis_transform") || url.contains("oauth2") == false && url.contains("gsi")
+        guard isCallback || url.hasSuffix("redirect_uri") else { return }
         webView.evaluateJavaScript("(document.body ? document.body.innerText.trim().length : 0)") { [weak self, weak webView] value, _ in
             guard let self, let webView, webView === self.popup else { return }
             let length = (value as? Int) ?? (value as? NSNumber)?.intValue ?? 0
-            if length < 5 {
-                debugLog("popup blank -> closing")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-                    guard let self, webView === self.popup else { return }
-                    self.dismissPopup()
-                }
+            guard length < 5 else { return }
+            debugLog("popup callback blank -> closing")
+            // The opener posts its credential on load; give that a moment.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in
+                guard let self, webView === self.popup else { return }
+                self.dismissPopup()
             }
         }
     }
@@ -2802,7 +2857,8 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         let local = convert(point, from: superview)
-        if moveRect.contains(local) || resizeRect.contains(local) || closeRect.contains(local) { return self }
+        if moveRect.contains(local) || closeRect.contains(local) { return self }
+        if resizeRect.contains(local), !site.sizeLocked { return self }
         return super.hitTest(point)
     }
 
@@ -2959,6 +3015,77 @@ private func surfaceCursorZone(_ p: CGPoint, _ rect: CGRect, close: Bool) -> Sur
     return nil
 }
 
+@MainActor
+private final class UndoMeter: ObservableObject {
+    @Published var remaining: CGFloat = 1
+}
+
+/// A five-second offer to undo a removal. The border drains from green to red.
+@MainActor
+private struct UndoOfferPill: View {
+    let id: UUID
+    let center: CGPoint
+    let onUndo: () -> Void
+    let onExpire: () -> Void
+    @StateObject private var meter = UndoMeter()
+
+    private var tint: Color {
+        Color(hue: 0.33 * Double(meter.remaining), saturation: 0.72, brightness: 0.92)
+    }
+
+    var body: some View {
+        Group {
+            HStack(spacing: 7) {
+                Image(systemName: "arrow.uturn.backward")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("Undo").font(.system(size: 12, weight: .semibold))
+            }
+            .foregroundStyle(.white.opacity(0.94))
+            .padding(.horizontal, 14).padding(.vertical, 9)
+            .background {
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .fill(Color.black.opacity(0.35)))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .trim(from: 0, to: meter.remaining)
+                    .stroke(tint, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                    .padding(1)
+            }
+            .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .strokeBorder(.white.opacity(0.08), lineWidth: 0.5))
+            .shadow(color: .black.opacity(0.4), radius: 16, y: 6)
+            .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .background {
+                GeometryReader { proxy in
+                    Color.clear
+                        .onAppear {
+                            MenuHover.shared.setAction("undo:" + id.uuidString, onUndo)
+                            MenuHover.shared.register("undo:" + id.uuidString, proxy.frame(in: .global))
+                        }
+                        .onChange(of: proxy.frame(in: .global)) { _, new in
+                            MenuHover.shared.register("undo:" + id.uuidString, new)
+                        }
+                }
+            }
+            .onTapGesture(perform: onUndo)
+        }
+        .position(x: center.x, y: center.y)
+        .onAppear {
+            meter.remaining = 1
+            withAnimation(.linear(duration: 5)) { meter.remaining = 0 }
+        }
+        .task {
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard !Task.isCancelled else { return }
+            onExpire()
+        }
+        .onDisappear { MenuHover.shared.clear("undo:" + id.uuidString) }
+    }
+}
+
 private struct RoundedResizeCorner: Shape {
     func path(in rect: CGRect) -> Path {
         var p = Path()
@@ -3079,6 +3206,16 @@ private struct SeeOverlay: View {
                         .transition(.asymmetric(
                             insertion: .opacity.combined(with: .scale(scale: 0.94)),
                             removal: .opacity.combined(with: .scale(scale: 0.92))))
+                }
+
+                // Undo a removal, right where the surface was
+                if let offer = model.undoOffer {
+                    UndoOfferPill(id: offer.id,
+                                  center: offer.center,
+                                  onUndo: { model.performUndo() },
+                                  onExpire: { model.expireUndo(offer.id) })
+                        .id(offer.id)
+                        .zIndex(55)
                 }
 
                 // Drag-creating rubber band
@@ -4533,6 +4670,8 @@ private struct SurfaceContextMenu: View {
                 row("Configure Website…", "slider.horizontal.3", onConfigure)
                 row("Reload", "arrow.clockwise", onReload)
                 row("Open in Browser", "safari", onOpenInBrowser)
+                row(sizeLocked ? "Unlock Size" : "Lock Size",
+                    sizeLocked ? "lock.open" : "lock", onToggleLock)
                 sep
                 row("Remove Website", "trash", onRemove, destructive: true)
             } else {
@@ -4958,8 +5097,9 @@ private struct ChromeOverlay: View {
                             }
                             withAnimation { model.surfaceMenu = nil }
                         },
-                        sizeLocked: menu.widget?.sizeLocked ?? false,
+                        sizeLocked: menu.site?.sizeLocked ?? menu.widget?.sizeLocked ?? false,
                         onToggleLock: {
+                            if let site = menu.site { site.sizeLocked.toggle() }
                             if let widget = menu.widget { widget.sizeLocked.toggle() }
                             withAnimation { model.surfaceMenu = nil }
                         },
