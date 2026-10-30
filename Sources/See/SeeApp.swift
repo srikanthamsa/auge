@@ -234,6 +234,7 @@ private final class HostContainerView<Content: View>: NSView {
         addSubview(host)
     }
     required init?(coder: NSCoder) { fatalError() }
+
     override func layout() {
         super.layout()
         host.frame = bounds
@@ -1339,6 +1340,10 @@ enum SiteCatalog {
 }
 
 private enum PageScripts {
+    /// WebKit gives a popup created by `window.open` no `window.opener`, so
+    /// OAuth popups (Google Identity, Apple) can never hand their result back.
+    /// This shim forwards the popup's opener messages to See, which re-delivers
+    /// them to the page that opened it.
     static let scrollReporter = """
     (function(){
       if (window.__seeScrollHooked) { return; }
@@ -2710,6 +2715,9 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
         // Only the identity callback page is safe to drop: closing a real page
         // would break the flow the opener is still waiting on.
         let url = webView.url?.absoluteString ?? ""
+        webView.evaluateJavaScript("JSON.stringify({u: location.href, op: !!window.opener, t: (document.body?document.body.innerText.length:-1)})") { v, _ in
+            debugLog("popup nav -> \(String(describing: v))")
+        }
         let isCallback = url.contains("gis_transform") || url.contains("oauth2") == false && url.contains("gsi")
         guard isCallback || url.hasSuffix("redirect_uri") else { return }
         webView.evaluateJavaScript("(document.body ? document.body.innerText.trim().length : 0)") { [weak self, weak webView] value, _ in
@@ -2733,6 +2741,8 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         guard navigationAction.targetFrame == nil else { return nil }
         dismissPopup()
+        // WebKit requires the configuration it handed us: anything else breaks
+        // the window relationship and `window.open` then returns null.
         let child = WKWebView(frame: bounds, configuration: configuration)
         child.autoresizingMask = [.width, .height]
         child.customUserAgent = site.config.userAgent.string
