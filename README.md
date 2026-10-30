@@ -1,6 +1,6 @@
 # Auge
 
-**AUGE: See Beyond.**
+**See Beyond.**
 
 Native macOS workspace for websites, files and widgets, one keystroke away.
 

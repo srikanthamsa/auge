@@ -78,13 +78,29 @@ final class OnboardingAudio {
         return nil
     }
 
+    /// Seconds of score to use, counted from the beginning of the file. Long
+    /// sources (a stream rip, say) are cut here and faded out rather than
+    /// looping forever.
+    private let clip: TimeInterval = 46
+    private let fadeOut: TimeInterval = 4
+
     func play() {
         guard player == nil, let url else { return }
         guard let p = try? AVAudioPlayer(contentsOf: url) else { return }
-        p.numberOfLoops = -1
+        p.numberOfLoops = 0
         p.volume = 0.5
+        p.currentTime = 0
         p.play()
         player = p
+        let clipLength = clip
+        let fade = fadeOut
+        let stop = min(clipLength, p.duration)
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, stop - fade)) { [weak p] in
+            p?.setVolume(0, fadeDuration: fade)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + stop) { [weak p] in
+            p?.stop()
+        }
     }
 
     func setMuted(_ muted: Bool) {
@@ -237,7 +253,7 @@ private struct OnboardingView: View {
                 .font(.system(size: 68, weight: .semibold))
                 .tracking(-1.5)
                 .foregroundStyle(.white)
-            Text("AUGE: See Beyond.")
+            Text("See Beyond.")
                 .font(.system(size: 15, weight: .medium))
                 .tracking(2.4)
                 .foregroundStyle(.white.opacity(0.55))
