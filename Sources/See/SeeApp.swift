@@ -1672,12 +1672,38 @@ private enum PageScripts {
         return current;
       }
 
-      function hideZappedElements() {
+      function applyHides() {
         ensureStyles();
         getRegistry().forEach(function (item) {
           var target = findElementByPath(item.path);
-          if (target) { target.style.display = 'none'; }
+          if (target && target.style.display !== 'none') { target.style.display = 'none'; }
         });
+      }
+
+      var reapplyTimer = null;
+      function scheduleReapply() {
+        if (reapplyTimer) { return; }
+        reapplyTimer = setTimeout(function () { reapplyTimer = null; applyHides(); }, 120);
+      }
+
+      // Single-page apps rebuild their DOM after a route change, which brings a
+      // zapped element back until the page is reloaded. Re-apply on any mutation.
+      function watch() {
+        if (window.__seeZapObserver) { return; }
+        window.__seeZapObserver = new MutationObserver(function () {
+          if (getRegistry().length) { scheduleReapply(); }
+        });
+        window.__seeZapObserver.observe(document.documentElement, { childList: true, subtree: true });
+        window.addEventListener('popstate', scheduleReapply);
+        window.addEventListener('hashchange', scheduleReapply);
+        var push = history.pushState, replace = history.replaceState;
+        history.pushState = function () { var r = push.apply(this, arguments); scheduleReapply(); return r; };
+        history.replaceState = function () { var r = replace.apply(this, arguments); scheduleReapply(); return r; };
+      }
+
+      function hideZappedElements() {
+        applyHides();
+        watch();
         notify();
       }
 
@@ -1775,6 +1801,7 @@ private enum PageScripts {
         restore: restore,
         clearAll: clearAll,
         refresh: hideZappedElements,
+        reapply: applyHides,
         list: getRegistry,
         isActive: function () { return active; }
       };
@@ -2712,6 +2739,26 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
         // callback, for instance) has already handed control back to the opener;
         // leaving it on screen is the white sheet people see after a failed
         // login. Close it once we know it is blank.
+        // An OAuth provider that redirects back to the site's own domain can be
+        // finished in the surface itself: loading that URL here yields the
+        // session cookie, so the widget comes back signed in.
+        if let popupURL = webView.url,
+           let siteHost = URL(string: site.address)?.host,
+           let popupHost = popupURL.host,
+           popupHost == siteHost || popupHost == "www." + siteHost || siteHost == "www." + popupHost,
+           popupSawForeignHost {
+            debugLog("popup landed back on the site -> \(popupURL.absoluteString)")
+            if let mainView = self.webView as WKWebView? {
+                mainView.load(URLRequest(url: popupURL))
+            }
+            popupSawForeignHost = false
+            dismissPopup()
+            return
+        }
+        if let host = webView.url?.host, host != URL(string: site.address)?.host {
+            popupSawForeignHost = true
+        }
+
         // Only the identity callback page is safe to drop: closing a real page
         // would break the flow the opener is still waiting on.
         let url = webView.url?.absoluteString ?? ""
@@ -2736,6 +2783,7 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
     // MARK: Popups (sign-in with Google and friends)
 
     private var popup: WKWebView?
+    private var popupSawForeignHost = false
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
@@ -2787,6 +2835,7 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
     @objc private func closePopupTapped() { dismissPopup() }
 
     private func dismissPopup() {
+        popupSawForeignHost = false
         popup?.removeFromSuperview()
         popup = nil
         popupCloseButton?.removeFromSuperview()
@@ -4130,6 +4179,58 @@ private struct BatteryView: View {
                 }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background {
+            if power.onPower { ChargingWave() }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+    }
+}
+
+/// A slow green swell that rises under the battery while it is charging.
+private struct ChargingWave: View {
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            GeometryReader { geo in
+                ZStack(alignment: .bottom) {
+                    WaveShape(phase: t * 0.9, amplitude: 6, level: 0.34)
+                        .fill(LinearGradient(colors: [Color.green.opacity(0.30), Color.green.opacity(0.06)],
+                                             startPoint: .top, endPoint: .bottom))
+                    WaveShape(phase: t * 0.9 + 1.7, amplitude: 4, level: 0.26)
+                        .fill(Color.green.opacity(0.16))
+                }
+                .frame(height: geo.size.height)
+                .mask(alignment: .bottom) { Rectangle().frame(height: geo.size.height) }
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+/// Two summed sines: a soft repeating swell that never visibly restarts.
+private struct WaveShape: Shape {
+    var phase: Double
+    var amplitude: CGFloat
+    var level: CGFloat   // 0...1, how high the wave sits from the bottom
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let baseY = rect.maxY - rect.height * level
+        let step: CGFloat = 3
+        path.move(to: CGPoint(x: rect.minX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: baseY))
+        var x = rect.minX
+        while x <= rect.maxX {
+            let angle = Double(x / rect.width) * .pi * 2
+            let y = baseY
+                + CGFloat(sin(angle * 1.0 + phase)) * amplitude
+                + CGFloat(sin(angle * 2.0 + phase * 1.7)) * (amplitude * 0.45)
+            path.addLine(to: CGPoint(x: x, y: y))
+            x += step
+        }
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.closeSubpath()
+        return path
     }
 }
 
