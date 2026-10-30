@@ -1344,6 +1344,75 @@ private enum PageScripts {
     /// OAuth popups (Google Identity, Apple) can never hand their result back.
     /// This shim forwards the popup's opener messages to See, which re-delivers
     /// them to the page that opened it.
+    /// Google Identity Services asks for FedCM, which an embedded WebKit view
+    /// does not have, so its button silently does nothing. Forcing the legacy
+    /// prompt path keeps sign-in inside the page.
+    static let gisFallback = #"""
+    (function(){
+      if (window.__seeGISFallback) { return; }
+      window.__seeGISFallback = true;
+      // GIS checks that the message came from the window it opened, so keep the
+      // proxy that window.open returned.
+      var realOpen = window.open;
+      window.open = function () {
+        var opened = realOpen.apply(window, arguments);
+        try { window.__seeLastPopup = opened; } catch (e) {}
+        return opened;
+      };
+      var attempts = 0;
+      var patch = function () {
+        attempts += 1;
+        var gid = window.google && window.google.accounts && window.google.accounts.id;
+        if (gid && !gid.__seePatched) {
+          gid.__seePatched = true;
+          var init = gid.initialize;
+          gid.initialize = function (config) {
+            try {
+              config.use_fedcm_for_prompt = false;
+              // Redirect mode keeps the whole exchange in this web view: the
+              // provider navigates back with the result in the URL, so no popup
+              // window (and none of its missing opener) is involved.
+              config.ux_mode = 'redirect';
+            } catch (e) {}
+            return init.call(gid, config);
+          };
+          var prompt = gid.prompt;
+          gid.prompt = function (listener) {
+            try { return prompt.call(gid, listener); } catch (e) { return undefined; }
+          };
+        }
+        if (attempts < 400 && !(gid && gid.__seePatched)) { setTimeout(patch, 100); }
+      };
+      patch();
+    })();
+    """#
+
+    /// A popup created by WebKit has no `window.opener`, so providers that post
+    /// their result back to the opener can never finish. This shim forwards the
+    /// message to See, which re-delivers it to the page that opened the popup.
+    static let popupOpenerShim = #"""
+    (function(){
+      if (window.__seeShimmed) { return; }
+      window.__seeShimmed = true;
+      var send = function (data) {
+        try {
+          window.webkit.messageHandlers.seeOpener.postMessage({ data: typeof data === 'string' ? data : JSON.stringify(data), origin: location.origin });
+        } catch (e) {}
+      };
+      try {
+        window.opener = {
+          postMessage: send,
+          closed: false,
+          focus: function () {},
+          blur: function () {},
+          close: function () {}
+        };
+      } catch (e) {}
+      var realClose = window.close;
+      window.close = function () { try { realClose.call(window); } catch (e) {} };
+    })();
+    """#
+
     static let scrollReporter = """
     (function(){
       if (window.__seeScrollHooked) { return; }
@@ -2241,6 +2310,11 @@ private final class SeeWebBridge: NSObject, WKScriptMessageHandler {
         case "seeScroll":
             if let value = message.body as? Double { site?.scrollY = value }
             else if let value = message.body as? NSNumber { site?.scrollY = value.doubleValue }
+        case "seeOpener":
+            if let body = message.body as? [String: Any],
+               let data = body["data"] as? String {
+                site?.deliverOpenerMessage(data, origin: body["origin"] as? String ?? "https://accounts.google.com")
+            }
         case "seeZap":
             if let body = message.body as? [String: Any],
                let items = body["items"] as? [[String: Any]] {
@@ -2424,6 +2498,8 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         controller.removeAllUserScripts()
         // The zapper owns the "hidden elements" list in the page's own storage,
         // so it has to exist before the document paints.
+        controller.addUserScript(WKUserScript(source: PageScripts.gisFallback,
+                                              injectionTime: .atDocumentStart, forMainFrameOnly: true))
         controller.addUserScript(WKUserScript(source: PageScripts.zapper,
                                               injectionTime: .atDocumentStart, forMainFrameOnly: true))
         if config.darkMode {
@@ -2586,6 +2662,26 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         let x = Int(point.x.rounded()), y = Int(point.y.rounded())
         guard x >= 0, y >= 0, x <= Int(size.width), y <= Int(size.height) else { return }
         webView?.evaluateJavaScript("window.__seeZapper && window.__seeZapper.zapAt(\(x), \(y));", completionHandler: nil)
+    }
+
+    /// Re-delivers a popup's opener message into the page that opened it, the way
+    /// a real browser window would (same payload, same origin).
+    func deliverOpenerMessage(_ data: String, origin: String) {
+        guard let webView else { return }
+        let encoded = (try? JSONSerialization.data(withJSONObject: [data], options: []))
+            .flatMap { String(data: $0, encoding: .utf8) }
+            .map { String($0.dropFirst().dropLast()) } ?? "\"\""
+        let safeOrigin = origin.replacingOccurrences(of: "\"", with: "")
+        let js = """
+        (function(){
+          var payload = \(encoded);
+          var init = { data: payload, origin: "\(safeOrigin)", source: window.__seeLastPopup || window };
+          try { window.dispatchEvent(new MessageEvent('message', init)); } catch (e) {}
+          try { window.postMessage(payload, '*'); } catch (e) {}
+        })();
+        """
+        webView.evaluateJavaScript(js, completionHandler: nil)
+        debugLog("opener message delivered len=\(data.count) origin=\(safeOrigin) ")
     }
 
     func startZapper() { webView?.evaluateJavaScript("window.__seeZapper && window.__seeZapper.enable();", completionHandler: nil) }
@@ -2791,6 +2887,10 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
         dismissPopup()
         // WebKit requires the configuration it handed us: anything else breaks
         // the window relationship and `window.open` then returns null.
+        configuration.userContentController.add(WeakScriptHandler(bridge), name: "seeOpener")
+        configuration.userContentController.addUserScript(
+            WKUserScript(source: PageScripts.popupOpenerShim,
+                         injectionTime: .atDocumentStart, forMainFrameOnly: true))
         let child = WKWebView(frame: bounds, configuration: configuration)
         child.autoresizingMask = [.width, .height]
         child.customUserAgent = site.config.userAgent.string
@@ -4179,58 +4279,6 @@ private struct BatteryView: View {
                 }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background {
-            if power.onPower { ChargingWave() }
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-    }
-}
-
-/// A slow green swell that rises under the battery while it is charging.
-private struct ChargingWave: View {
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            GeometryReader { geo in
-                ZStack(alignment: .bottom) {
-                    WaveShape(phase: t * 0.9, amplitude: 6, level: 0.34)
-                        .fill(LinearGradient(colors: [Color.green.opacity(0.30), Color.green.opacity(0.06)],
-                                             startPoint: .top, endPoint: .bottom))
-                    WaveShape(phase: t * 0.9 + 1.7, amplitude: 4, level: 0.26)
-                        .fill(Color.green.opacity(0.16))
-                }
-                .frame(height: geo.size.height)
-                .mask(alignment: .bottom) { Rectangle().frame(height: geo.size.height) }
-            }
-        }
-        .allowsHitTesting(false)
-    }
-}
-
-/// Two summed sines: a soft repeating swell that never visibly restarts.
-private struct WaveShape: Shape {
-    var phase: Double
-    var amplitude: CGFloat
-    var level: CGFloat   // 0...1, how high the wave sits from the bottom
-
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        let baseY = rect.maxY - rect.height * level
-        let step: CGFloat = 3
-        path.move(to: CGPoint(x: rect.minX, y: rect.maxY))
-        path.addLine(to: CGPoint(x: rect.minX, y: baseY))
-        var x = rect.minX
-        while x <= rect.maxX {
-            let angle = Double(x / rect.width) * .pi * 2
-            let y = baseY
-                + CGFloat(sin(angle * 1.0 + phase)) * amplitude
-                + CGFloat(sin(angle * 2.0 + phase * 1.7)) * (amplitude * 0.45)
-            path.addLine(to: CGPoint(x: x, y: y))
-            x += step
-        }
-        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
-        path.closeSubpath()
-        return path
     }
 }
 
@@ -4500,6 +4548,11 @@ private struct GlassMenuBackground: View {
 // MARK: - Widget picker
 
 @MainActor
+private final class PickerSelection: ObservableObject {
+    @Published var index = 0
+}
+
+@MainActor
 private struct WidgetPickerOverlay: View {
     @Binding var category: WidgetPickerCategory
     @Binding var search: String
@@ -4508,6 +4561,7 @@ private struct WidgetPickerOverlay: View {
     let onAddWidget: (NativeWidgetKind) -> Void
 
     @FocusState private var searchFocused: Bool
+    @StateObject private var selection = PickerSelection()
 
     var body: some View {
         ZStack {
@@ -4524,6 +4578,10 @@ private struct WidgetPickerOverlay: View {
                     TextField("Enter the website, widget, or app you want to see…", text: $search)
                         .textFieldStyle(.plain).font(.system(size: 15, weight: .medium)).onSubmit(submitSearch)
                         .focused($searchFocused)
+                        .onChange(of: search) { _, _ in selection.index = 0 }
+                        .onKeyPress(.downArrow) { move(1); return .handled }
+                        .onKeyPress(.upArrow) { move(-1); return .handled }
+                        .onKeyPress(.return) { confirmSelection(); return .handled }
                         .onAppear {
                             searchFocused = true
                             // The panel can still be settling when the picker
@@ -4582,6 +4640,23 @@ private struct WidgetPickerOverlay: View {
 
     private var suggestions: [SiteSuggestion] { SiteCatalog.suggestions(for: search) }
 
+    private func move(_ delta: Int) {
+        guard !suggestions.isEmpty else { return }
+        let next = selection.index + delta
+        selection.index = max(0, min(suggestions.count - 1, next))
+    }
+
+    private func confirmSelection() {
+        guard !suggestions.isEmpty else {
+            if category == .websites, !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                onAddWebsite(search)
+            }
+            return
+        }
+        let index = min(selection.index, suggestions.count - 1)
+        onAddWebsite(suggestions[index].url)
+    }
+
     private var websiteContent: some View {
         VStack(alignment: .leading, spacing: 10) {
             if !suggestions.isEmpty {
@@ -4608,6 +4683,9 @@ private struct WidgetPickerOverlay: View {
                                     .foregroundStyle(.white.opacity(0.28))
                             }
                             .padding(.horizontal, 10).padding(.vertical, 7)
+                            .background(selection.index == (suggestions.firstIndex(of: suggestion) ?? 0)
+                                        ? Color.white.opacity(0.10) : Color.clear,
+                                        in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                             .contentShape(Rectangle())
                         }.buttonStyle(.plain)
                     }
@@ -4671,8 +4749,8 @@ private struct WidgetPickerOverlay: View {
     }
 
     private func submitSearch() {
-        guard category == .websites, !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        onAddWebsite(search)
+        guard category == .websites else { return }
+        confirmSelection()
     }
 }
 
