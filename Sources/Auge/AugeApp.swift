@@ -3048,7 +3048,17 @@ private final class PageLoadBeamView: NSView {
         tail = 0
         head = 2
         setVisible(true, duration: 0.10)
-        animateReveal(duration: 0.12)
+        // Anchor at the left edge with no animation: animating from the previous
+        // wipe's position made the line fly in from the right before growing.
+        applyRevealNow()
+    }
+
+    private func applyRevealNow() {
+        guard bounds.width > 0 else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        reveal.frame = CGRect(x: tail, y: 0, width: max(0, head - tail), height: bounds.height)
+        CATransaction.commit()
     }
 
     private func finishLoad() {
@@ -3069,6 +3079,7 @@ private final class PageLoadBeamView: NSView {
                 self.phase = .idle
                 self.tail = 0
                 self.head = 2
+                self.applyRevealNow()
             }
         }
     }
