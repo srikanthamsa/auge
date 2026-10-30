@@ -39,7 +39,7 @@ enum AppBrand {
     }
 
     static var icon: NSImage? {
-        image("AppIcon-1024") ?? NSImage(systemSymbolName: "eye", accessibilityDescription: "Auge")
+        image("AugeMark") ?? image("AppIcon-1024") ?? NSImage(systemSymbolName: "eye", accessibilityDescription: "Auge")
     }
 
     static var menuMark: NSImage? {
