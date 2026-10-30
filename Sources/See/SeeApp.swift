@@ -253,6 +253,7 @@ private struct WorkspaceInteractionMonitor: NSViewRepresentable {
     let onDismiss: (CGPoint) -> Void
     let isSurfaceAt: (CGPoint) -> Bool
     let contextMenuFrame: () -> CGRect?
+    let onZapAt: (CGPoint) -> Bool         // true when a zapping surface took the click
     let onDragCreating: (CGRect) -> Void   // live rect while drawing
     let onDragCreated: (CGRect) -> Void    // final rect on mouseUp
 
@@ -267,6 +268,7 @@ private struct WorkspaceInteractionMonitor: NSViewRepresentable {
         v.onDismiss = onDismiss
         v.isSurfaceAt = isSurfaceAt
         v.contextMenuFrame = contextMenuFrame
+        v.onZapAt = onZapAt
         v.onDragCreating = onDragCreating
         v.onDragCreated = onDragCreated
     }
@@ -279,12 +281,15 @@ final class WorkspaceInteractionView: NSView {
     var onDismiss: ((CGPoint) -> Void)?
     var isSurfaceAt: ((CGPoint) -> Bool)?
     var contextMenuFrame: (() -> CGRect?)?
+    var onZapAt: ((CGPoint) -> Bool)?
     var onDragCreating: ((CGRect) -> Void)?
     var onDragCreated: ((CGRect) -> Void)?
 
     private var eventMonitor: Any?
     private var dragStart: CGPoint?
     private var swallowMouseUp = false
+    private var lastDownTime: TimeInterval = 0
+    private var lastDownPoint = CGPoint(x: -1000, y: -1000)
 
     override var isFlipped: Bool { true }
 
@@ -308,6 +313,14 @@ final class WorkspaceInteractionView: NSView {
                 debugLog("right down at \(point)")
                 self.onRightClick?(point); return nil
             case .leftMouseDown:
+                // The panel re-delivers a single physical click while it becomes
+                // key; the second copy would toggle a control back.
+                let t = event.timestamp
+                if t - self.lastDownTime < 0.05, hypot(point.x - self.lastDownPoint.x, point.y - self.lastDownPoint.y) < 4 {
+                    self.lastDownTime = 0
+                    return nil
+                }
+                self.lastDownTime = t; self.lastDownPoint = point
                 if MenuHover.shared.invoke(at: point) {
                     // The action ran on mouse-down; swallow its mouse-up so a
                     // control that appears under the pointer cannot act on the
@@ -316,6 +329,7 @@ final class WorkspaceInteractionView: NSView {
                     return nil
                 }
                 debugLog("left down at \(point) key=\(self.window?.isKeyWindow == true) active=\(NSApp.isActive) menuFrame=\(String(describing: self.contextMenuFrame?())) inMenu=\(self.contextMenuFrame?().map { $0.contains(point) } ?? false)")
+                if self.onZapAt?(point) == true { return nil }
                 if let menuFrame = self.contextMenuFrame?(), !menuFrame.contains(point) { self.onDismiss?(point) }
                 else if self.contextMenuFrame?() == nil { self.onDismiss?(point) }
                 // Only start drag-to-create on empty workspace
@@ -944,7 +958,7 @@ private enum WebsiteUserAgent: String, CaseIterable, Codable, Identifiable {
 private struct WebsiteConfig: Codable, Equatable {
     var autoRefresh: Double = 0            // seconds, 0 = off
     var rememberScroll = true
-    var userAgent: WebsiteUserAgent = .chromeMac
+    var userAgent: WebsiteUserAgent = .safariMac
     var hiddenSelectors: [String] = []
     var darkMode = false
     /// CSS the user writes for this surface; injected on every load.
@@ -958,7 +972,7 @@ private struct WebsiteConfig: Codable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         autoRefresh = try c.decodeIfPresent(Double.self, forKey: .autoRefresh) ?? 0
         rememberScroll = try c.decodeIfPresent(Bool.self, forKey: .rememberScroll) ?? true
-        userAgent = try c.decodeIfPresent(WebsiteUserAgent.self, forKey: .userAgent) ?? .chromeMac
+        userAgent = try c.decodeIfPresent(WebsiteUserAgent.self, forKey: .userAgent) ?? .safariMac
         hiddenSelectors = try c.decodeIfPresent([String].self, forKey: .hiddenSelectors) ?? []
         darkMode = try c.decodeIfPresent(Bool.self, forKey: .darkMode) ?? false
         customCode = try c.decodeIfPresent(String.self, forKey: .customCode) ?? ""
@@ -1461,7 +1475,6 @@ private enum PageScripts {
         e.preventDefault();
         e.stopPropagation();
         zapElement(e.target);
-        disable();
       }
 
       function enable() {
@@ -2075,6 +2088,14 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         } else {
             webView.evaluateJavaScript(PageScripts.darkModeOff, completionHandler: nil)
         }
+        webView.evaluateJavaScript("JSON.stringify({t: document.title, n: (document.body ? document.body.innerText.length : -1), bg: getComputedStyle(document.body||document.documentElement).backgroundColor, url: location.href})") { v, e in
+            debugLog("load state \(self.title) -> \(String(describing: v)) err=\(String(describing: e))")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak webView] in
+            webView?.evaluateJavaScript("JSON.stringify({t: document.title, n: (document.body ? document.body.innerText.length : -1), html: document.documentElement.outerHTML.length, url: location.href, bg: getComputedStyle(document.body||document.documentElement).backgroundColor, scripts: document.scripts.length})") { v, _ in
+                debugLog("settled \(self.title) -> \(String(describing: v))")
+            }
+        }
         webView.customUserAgent = config.userAgent.string
         webView.appearance = config.darkMode ? NSAppearance(named: .darkAqua) : nil
         installUserScripts(in: webView)
@@ -2249,6 +2270,12 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         }
     }
 
+    func zap(at point: CGPoint) {
+        let x = Int(point.x.rounded()), y = Int(point.y.rounded())
+        guard x >= 0, y >= 0, x <= Int(size.width), y <= Int(size.height) else { return }
+        webView?.evaluateJavaScript("window.__seeZapper && window.__seeZapper.zapAt(\(x), \(y));", completionHandler: nil)
+    }
+
     func startZapper() { webView?.evaluateJavaScript("window.__seeZapper && window.__seeZapper.enable();", completionHandler: nil) }
     func stopZapper() { webView?.evaluateJavaScript("window.__seeZapper && window.__seeZapper.disable();", completionHandler: nil) }
 
@@ -2389,6 +2416,14 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         site.didFinishLoad(in: webView)
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        debugLog("nav fail \(site.title): \(error.localizedDescription)")
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        debugLog("nav provisional fail \(site.title): \(error.localizedDescription)")
     }
 
     override func viewDidMoveToWindow() {
@@ -2773,6 +2808,15 @@ private struct SeeOverlay: View {
                     },
                     isSurfaceAt: { pt in isPointOverSurface(pt, size: size) },
                     contextMenuFrame: { activeMenuFrame(in: size) },
+                    onZapAt: { point in
+                        guard let site = model.websites.first(where: { $0.isPickingElements }) else { return false }
+                        let rect = CGRect(x: site.center.x - site.size.width / 2,
+                                          y: site.center.y - site.size.height / 2,
+                                          width: site.size.width, height: site.size.height)
+                        guard rect.contains(point) else { return false }
+                        site.zap(at: CGPoint(x: point.x - rect.minX, y: point.y - rect.minY))
+                        return true
+                    },
                     onDragCreating: { rect in model.dragCreatingRect = rect },
                     onDragCreated: { rect in
                         debugLog("drag created \(rect)")
@@ -4266,70 +4310,110 @@ private struct ConfigureWidgetOverlay: View {
                     divider
 
                     VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text("Zap elements").font(.system(size: 13, weight: .medium)).foregroundStyle(ink)
+                        HStack(spacing: 7) {
+                            Text("Zap elements")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(ink)
+                            if !site.zapped.isEmpty {
+                                Text("\(site.zapped.count)")
+                                    .font(.system(size: 9.5, weight: .semibold))
+                                    .monospacedDigit()
+                                    .foregroundStyle(.white.opacity(0.75))
+                                    .padding(.horizontal, 6).padding(.vertical, 2)
+                                    .background(.white.opacity(0.12), in: Capsule())
+                            }
                             Spacer()
                             Button {
                                 if site.isPickingElements { site.setPicking(false) } else { site.setPicking(true) }
                             } label: {
                                 HStack(spacing: 5) {
-                                    Image(systemName: site.isPickingElements ? "xmark" : "bolt.slash")
-                                        .font(.system(size: 10, weight: .bold))
-                                    Text(site.isPickingElements ? "Cancel" : "Zap…")
-                                        .font(.system(size: 12, weight: .semibold))
+                                    Image(systemName: site.isPickingElements ? "checkmark" : "bolt.slash.fill")
+                                        .font(.system(size: 9, weight: .bold))
+                                    Text(site.isPickingElements ? "Done" : "Zap…")
+                                        .font(.system(size: 11.5, weight: .semibold))
+                                        .tracking(0.2)
                                 }
                                 .foregroundStyle(site.isPickingElements ? Color(red: 0.42, green: 0.72, blue: 1.0) : ink)
-                                .padding(.horizontal, 11).padding(.vertical, 6)
+                                .padding(.horizontal, 11).padding(.vertical, 5.5)
                                 .background(.white.opacity(0.12), in: Capsule())
+                                .overlay(Capsule().strokeBorder(.white.opacity(0.08), lineWidth: 0.5))
+                                .background {
+                                    GeometryReader { proxy in
+                                        Color.clear
+                                            .onAppear {
+                                                MenuHover.shared.setAction("zp:" + site.id.uuidString) {
+                                                    site.setPicking(!site.isPickingElements)
+                                                }
+                                                MenuHover.shared.register("zp:" + site.id.uuidString, proxy.frame(in: .global))
+                                            }
+                                            .onChange(of: proxy.frame(in: .global)) { _, new in
+                                                MenuHover.shared.register("zp:" + site.id.uuidString, new)
+                                            }
+                                    }
+                                }
                             }.buttonStyle(.plain)
                         }
-                        if site.isPickingElements {
-                            Text("Click an element on the page to remove it. Esc to stop.")
-                                .font(.system(size: 11)).foregroundStyle(Color(red: 0.42, green: 0.72, blue: 1.0).opacity(0.9))
-                        }
-                        if site.zapped.isEmpty {
-                            if !site.isPickingElements {
-                                Text("Nothing zapped. Use Zap… and click anything on the page.")
-                                    .font(.system(size: 11)).foregroundStyle(dim)
-                            }
-                        } else {
-                            ForEach(site.zapped) { item in
-                                HStack(spacing: 8) {
-                                    Text(item.label)
-                                        .font(.system(size: 11, design: .monospaced))
-                                        .foregroundStyle(ink.opacity(0.85))
-                                        .lineLimit(1).truncationMode(.middle)
-                                    Spacer(minLength: 4)
-                                    Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
-                                        .foregroundStyle(.white.opacity(0.75))
-                                        .frame(width: 20, height: 20)
-                                        .contentShape(Rectangle())
-                                        .background {
-                                            GeometryReader { proxy in
-                                                Color.clear
-                                                    .onAppear {
-                                                        MenuHover.shared.setAction("uz:" + item.id) { site.restoreZapped(item.id) }
-                                                        MenuHover.shared.register("uz:" + item.id, proxy.frame(in: .global))
-                                                    }
-                                                    .onChange(of: proxy.frame(in: .global)) { _, new in
-                                                        MenuHover.shared.register("uz:" + item.id, new)
-                                                    }
+
+                        Text(site.isPickingElements
+                             ? "Click anything on the page to hide it."
+                             : "Remove parts of the page you never use.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(dim)
+
+                        if !site.zapped.isEmpty {
+                            VStack(spacing: 0) {
+                                ForEach(Array(site.zapped.enumerated()), id: \.element.id) { index, item in
+                                    if index > 0 {
+                                        Rectangle().fill(.white.opacity(0.06)).frame(height: 0.5)
+                                    }
+                                    HStack(spacing: 8) {
+                                        Circle()
+                                            .fill(Color(red: 1.0, green: 0.36, blue: 0.45).opacity(0.8))
+                                            .frame(width: 5, height: 5)
+                                        Text(item.label)
+                                            .font(.system(size: 11, weight: .regular, design: .monospaced))
+                                            .tracking(-0.1)
+                                            .foregroundStyle(ink.opacity(0.82))
+                                            .lineLimit(1).truncationMode(.middle)
+                                        Spacer(minLength: 4)
+                                        Image(systemName: "xmark")
+                                            .font(.system(size: 8.5, weight: .bold))
+                                            .foregroundStyle(.white.opacity(0.55))
+                                            .frame(width: 18, height: 18)
+                                            .contentShape(Rectangle())
+                                            .background {
+                                                GeometryReader { proxy in
+                                                    Color.clear
+                                                        .onAppear {
+                                                            MenuHover.shared.setAction("uz:" + item.id) { site.restoreZapped(item.id) }
+                                                            MenuHover.shared.register("uz:" + item.id, proxy.frame(in: .global))
+                                                        }
+                                                        .onChange(of: proxy.frame(in: .global)) { _, new in
+                                                            MenuHover.shared.register("uz:" + item.id, new)
+                                                        }
+                                                }
                                             }
-                                        }
+                                    }
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 7)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture { site.restoreZapped(item.id) }
                                 }
-                                .padding(.horizontal, 10).padding(.vertical, 8)
-                                .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
-                                .contentShape(RoundedRectangle(cornerRadius: 8))
-                                .onTapGesture { site.restoreZapped(item.id) }
                             }
+                            .background(Color.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
+
                             HStack {
                                 Spacer()
                                 Button {
                                     site.clearZapped()
                                 } label: {
-                                    Text("Restore all").font(.system(size: 11, weight: .semibold))
-                                        .foregroundStyle(dim)
-                                        .padding(.horizontal, 8).padding(.vertical, 5)
+                                    Text("Restore all")
+                                        .font(.system(size: 10.5, weight: .medium))
+                                        .tracking(0.2)
+                                        .foregroundStyle(.white.opacity(0.5))
+                                        .padding(.horizontal, 8).padding(.vertical, 4)
                                         .contentShape(Rectangle())
                                 }.buttonStyle(.plain)
                             }
