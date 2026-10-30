@@ -541,8 +541,10 @@ private final class OverlayModel: ObservableObject {
         }
         widgets = saved.widgets.compactMap { item in
             guard let kind = NativeWidgetKind(rawValue: item.kind) else { return nil }
-            return NativeWidgetSurface(kind: kind, center: CGPoint(x: item.x, y: item.y), id: item.id,
-                                       size: CGSize(width: item.w, height: item.h), note: item.note)
+            let surface = NativeWidgetSurface(kind: kind, center: CGPoint(x: item.x, y: item.y), id: item.id,
+                                              size: CGSize(width: item.w, height: item.h), note: item.note)
+            surface.sizeLocked = item.sizeLocked ?? false
+            return surface
         }
         if !websites.isEmpty || !widgets.isEmpty { hasPlacedInitialSite = true }
         adoptStackingOrder()
@@ -736,15 +738,17 @@ private final class OverlayModel: ObservableObject {
         struct Item {
             let isWidget: Bool
             let index: Int
+            let locked: Bool
             var size: CGSize
             var center: CGPoint
         }
 
         var items: [Item] = websites.enumerated().map {
-            Item(isWidget: false, index: $0.offset, size: $0.element.size, center: .zero)
+            Item(isWidget: false, index: $0.offset, locked: false, size: $0.element.size, center: .zero)
         }
         items += widgets.enumerated().map {
-            Item(isWidget: true, index: $0.offset, size: $0.element.size, center: .zero)
+            Item(isWidget: true, index: $0.offset, locked: $0.element.sizeLocked,
+                 size: $0.element.size, center: .zero)
         }
         guard !items.isEmpty else { return }
 
@@ -760,7 +764,7 @@ private final class OverlayModel: ObservableObject {
         if totalArea > usable.width * usable.height * 0.72 {
             scale = max(0.55, sqrt(usable.width * usable.height * 0.72 / totalArea))
         }
-        for i in items.indices {
+        for i in items.indices where !items[i].locked {
             items[i].size = CGSize(width: max(260, items[i].size.width * scale),
                                    height: max(200, items[i].size.height * scale))
         }
@@ -789,8 +793,10 @@ private final class OverlayModel: ObservableObject {
                 // Nothing fits at full size: take the largest free rectangle and
                 // shrink this surface into it, keeping its aspect ratio.
                 guard let big = remaining.max(by: { $0.width * $0.height < $1.width * $1.height }) else { continue }
-                let fit = min(big.width / need.width, big.height / need.height)
-                need = CGSize(width: max(200, need.width * fit), height: max(150, need.height * fit))
+                if !items[i].locked {
+                    let fit = min(big.width / need.width, big.height / need.height)
+                    need = CGSize(width: max(200, need.width * fit), height: max(150, need.height * fit))
+                }
                 slot = big
             }
             guard let rect = slot else { continue }
@@ -1086,6 +1092,7 @@ private struct WidgetSnapshot: Codable {
     var kind: String
     var x: Double, y: Double, w: Double, h: Double
     var note: String
+    var sizeLocked: Bool?
 }
 
 private struct WorkspaceSnapshot: Codable {
@@ -2184,6 +2191,8 @@ private final class NativeWidgetSurface: ObservableObject, Identifiable {
     @Published var size: CGSize
     @Published var note: String
     @Published var isDragging = false
+    /// Tidy keeps a locked widget's size; only its position may change.
+    @Published var sizeLocked = false
     /// Stacking order: the surface touched last carries the highest value.
     @Published var z: Double = 0
 
@@ -2194,7 +2203,8 @@ private final class NativeWidgetSurface: ObservableObject, Identifiable {
 
     var snapshot: WidgetSnapshot {
         WidgetSnapshot(id: id, kind: kind.rawValue,
-                       x: center.x, y: center.y, w: size.width, h: size.height, note: note)
+                       x: center.x, y: center.y, w: size.width, h: size.height, note: note,
+                       sizeLocked: sizeLocked)
     }
 }
 
@@ -2639,7 +2649,25 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
     override var isFlipped: Bool { true }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        if webView === self.webView { site.didFinishLoad(in: webView) }
+        if webView === self.webView {
+            site.didFinishLoad(in: webView)
+            return
+        }
+        // A sign-in popup that lands on an empty page (Google's form-post
+        // callback, for instance) has already handed control back to the opener;
+        // leaving it on screen is the white sheet people see after a failed
+        // login. Close it once we know it is blank.
+        webView.evaluateJavaScript("(document.body ? document.body.innerText.trim().length : 0)") { [weak self, weak webView] value, _ in
+            guard let self, let webView, webView === self.popup else { return }
+            let length = (value as? Int) ?? (value as? NSNumber)?.intValue ?? 0
+            if length < 5 {
+                debugLog("popup blank -> closing")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                    guard let self, webView === self.popup else { return }
+                    self.dismissPopup()
+                }
+            }
+        }
     }
 
     // MARK: Popups (sign-in with Google and friends)
@@ -2686,7 +2714,8 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
         button.autoresizingMask = [.minXMargin, .minYMargin]
         button.target = self
         button.action = #selector(closePopupTapped)
-        addSubview(button, positioned: .above, relativeTo: child)
+        addSubview(button)
+        button.layer?.zPosition = 10
         popupCloseButton = button
     }
 
@@ -2757,8 +2786,8 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
     }
 
     private func updateProximity(at local: CGPoint) {
-        let near = moveRect.insetBy(dx: -30, dy: -16).contains(local)
-            || resizeRect.insetBy(dx: -20, dy: -20).contains(local)
+        let near = moveRect.insetBy(dx: -18, dy: -10).contains(local)
+            || resizeRect.insetBy(dx: -12, dy: -12).contains(local)
         if near != handles.isNearControl { handles.isNearControl = near; handles.needsDisplay = true }
     }
     override func mouseExited(with event: NSEvent) {
@@ -2829,9 +2858,9 @@ private final class WebsiteHostView: NSView, WKNavigationDelegate, WKUIDelegate 
     // Proximity zones: draw targets are small; grab zone is generous
     func refreshHandles() { handles.needsDisplay = true }
 
-    private var moveRect: CGRect { CGRect(x: bounds.midX - 90, y: bounds.height - 72, width: 180, height: 72) }
-    private var resizeRect: CGRect { CGRect(x: bounds.width - 58, y: bounds.height - 58, width: 58, height: 58) }
-    private var closeRect: CGRect { CGRect(x: bounds.width - 58, y: 0, width: 58, height: 58) }
+    private var moveRect: CGRect { CGRect(x: bounds.midX - 52, y: bounds.height - 22, width: 104, height: 22) }
+    private var resizeRect: CGRect { CGRect(x: bounds.width - 30, y: bounds.height - 30, width: 30, height: 30) }
+    private var closeRect: CGRect { CGRect(x: bounds.width - 38, y: 0, width: 38, height: 38) }
 
     private var activeHandle: SurfaceHandleKind?
     private var dragStart = CGPoint.zero
@@ -2919,9 +2948,11 @@ private final class CursorZoneState {
 
 /// Handle hit zones in screen coordinates, matching the surface's control layout.
 private func surfaceCursorZone(_ p: CGPoint, _ rect: CGRect, close: Bool) -> SurfaceCursorZone? {
-    let resize = CGRect(x: rect.maxX - 58, y: rect.maxY - 58, width: 58, height: 58)
-    let move = CGRect(x: rect.midX - 90, y: rect.maxY - 72, width: 180, height: 72)
-    let closeRect = CGRect(x: rect.maxX - 58, y: rect.minY, width: 58, height: 58)
+    // Kept tight on purpose: the page's own links and buttons live right next
+    // to these edges and the handles used to swallow them.
+    let resize = CGRect(x: rect.maxX - 30, y: rect.maxY - 30, width: 30, height: 30)
+    let move = CGRect(x: rect.midX - 52, y: rect.maxY - 22, width: 104, height: 22)
+    let closeRect = CGRect(x: rect.maxX - 38, y: rect.minY, width: 38, height: 38)
     if close && closeRect.contains(p) { return .close }
     if resize.contains(p) { return .resize }
     if move.contains(p) { return .move }
@@ -3620,22 +3651,23 @@ private final class WidgetDragView: NSView {
 
     // Move zone: bottom-center bar; Resize zone: bottom-right corner
     private var moveRect: CGRect {
-        CGRect(x: bounds.midX - 60, y: bounds.height - 56, width: 120, height: 56)
+        CGRect(x: bounds.midX - 52, y: bounds.height - 22, width: 104, height: 22)
     }
     private var resizeRect: CGRect {
-        CGRect(x: bounds.width - 52, y: bounds.height - 52, width: 52, height: 52)
+        CGRect(x: bounds.width - 30, y: bounds.height - 30, width: 30, height: 30)
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         let local = convert(point, from: superview)
-        if moveRect.contains(local) || resizeRect.contains(local) { return self }
+        if moveRect.contains(local) { return self }
+        if resizeRect.contains(local), widget?.sizeLocked != true { return self }
         return nil   // let SwiftUI content handle everything else
     }
 
     override func mouseMoved(with event: NSEvent) {
         let pt = convert(event.locationInWindow, from: nil)
-        let nearMove = moveRect.insetBy(dx: -24, dy: -12).contains(pt)
-        let nearResize = resizeRect.insetBy(dx: -16, dy: -16).contains(pt)
+        let nearMove = moveRect.insetBy(dx: -16, dy: -8).contains(pt)
+        let nearResize = resizeRect.insetBy(dx: -8, dy: -8).contains(pt)
         onMoveActive?(nearMove); onResizeActive?(nearResize)
         if moveRect.contains(pt) { NSCursor.openHand.set() }
         else if resizeRect.contains(pt) { seeResizeCursor().set() }
@@ -4483,6 +4515,8 @@ private struct SurfaceContextMenu: View {
     let onConfigure: () -> Void
     let onReload: () -> Void
     let onOpenInBrowser: () -> Void
+    let sizeLocked: Bool
+    let onToggleLock: () -> Void
     let onRemove: () -> Void
     @ObservedObject private var hover = MenuHover.shared
 
@@ -4502,6 +4536,9 @@ private struct SurfaceContextMenu: View {
                 sep
                 row("Remove Website", "trash", onRemove, destructive: true)
             } else {
+                row(sizeLocked ? "Unlock Size" : "Lock Size",
+                    sizeLocked ? "lock.open" : "lock", onToggleLock)
+                sep
                 row("Remove Widget", "trash", onRemove, destructive: true)
             }
         }
@@ -4919,6 +4956,11 @@ private struct ChromeOverlay: View {
                             if let site = menu.site, let url = URL(string: site.address) {
                                 NSWorkspace.shared.open(url)
                             }
+                            withAnimation { model.surfaceMenu = nil }
+                        },
+                        sizeLocked: menu.widget?.sizeLocked ?? false,
+                        onToggleLock: {
+                            if let widget = menu.widget { widget.sizeLocked.toggle() }
                             withAnimation { model.surfaceMenu = nil }
                         },
                         onRemove: {
