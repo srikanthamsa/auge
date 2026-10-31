@@ -4823,7 +4823,15 @@ private struct SeeOverlay: View {
                         model.pickerCategory = .websites; model.pickerSearch = ""; model.showingWidgetPicker = true
                     }
                 } label: {
-                    Label("Add", systemImage: "plus")
+                    Label("Add", systemImage: "plus").background {
+                        GeometryReader { px in
+                            Color.clear
+                                .onAppear { MenuHover.shared.register("tb:add", px.frame(in: .global)) }
+                                .onChange(of: px.frame(in: .global)) { _, new in
+                                    MenuHover.shared.register("tb:add", new)
+                                }
+                        }
+                    }
                         .font(.system(size: 12, weight: .semibold))
                         .padding(.horizontal, 13).padding(.vertical, 8)
                         .background(.ultraThinMaterial, in: Capsule())
@@ -6596,6 +6604,8 @@ private final class MenuHover: ObservableObject {
     private var lastHitID: String?
     private var lastHitTime: CFAbsoluteTime = 0
 
+    func frame(_ id: String) -> CGRect? { frames[id] }
+
     func register(_ id: String, _ frame: CGRect) {
         if frame.width < 2 || frame.height < 2 { return }
         if frames[id] != frame { frames[id] = frame }
@@ -7512,34 +7522,34 @@ private struct ChromeOverlay: View {
 
 // MARK: - First-use coaching
 
-/// Four beats that teach the gestures once, on the first real visit: pin, add,
-/// right click, and drag out empty space to make the first vision.
+/// A spotlight tour. Targets are looked up by identifier from the live frame
+/// registry, so the cutout sits on the control itself rather than on a guess.
 @MainActor
 final class VisionTour: ObservableObject {
     static let shared = VisionTour()
 
     struct Beat {
+        let target: String?           // nil for the closing card
         let title: String
         let body: String
-        let anchor: CGPoint          // unit coordinates in the panel
     }
 
     let beats: [Beat] = [
-        Beat(title: "Pin what matters",
-             body: "Pin keeps a site or vision resting on the workspace when you let go.",
-             anchor: CGPoint(x: 0.932, y: 0.048)),
-        Beat(title: "Add anything",
-             body: "Add brings in a website, a file, or one of the built-in visions.",
-             anchor: CGPoint(x: 0.898, y: 0.048)),
-        Beat(title: "Right click a vision",
-             body: "Right clicking opens what that vision can do: refresh, resize, remove.",
-             anchor: CGPoint(x: 0.50, y: 0.42)),
-        Beat(title: "Drag out a space",
-             body: "Drag on empty workspace to place your first vision exactly where you want it.",
-             anchor: CGPoint(x: 0.31, y: 0.70))
+        Beat(target: "tb:add",
+             title: "A little window into the web.",
+             body: "Your pages live right here. Open them, move them, keep them within reach."),
+        Beat(target: "tb:add",
+             title: "Something worth keeping?",
+             body: "Add any webpage, web app, or dashboard. It'll be ready whenever you need it."),
+        Beat(target: "tb:pin",
+             title: "Some things deserve a place.",
+             body: "Pin a vision so it stays floating above your other windows."),
+        Beat(target: nil,
+             title: "That's Auge.",
+             body: "Hold Fn whenever you need another look.")
     ]
 
-    @Published var index = 0                 // 0 means the tour is not showing
+    @Published var index = 0
     private let key = "auge.tour.done"
 
     var hasFinished: Bool { UserDefaults.standard.bool(forKey: key) }
@@ -7549,9 +7559,8 @@ final class VisionTour: ObservableObject {
         index = 1
     }
 
-    func next() {
-        if index >= beats.count { finish() } else { index += 1 }
-    }
+    func next() { index >= beats.count ? finish() : (index += 1) }
+    func back() { index = max(1, index - 1) }
 
     func finish() {
         index = 0
@@ -7566,99 +7575,163 @@ private struct VisionTourOverlay: View {
         GeometryReader { geo in
             if tour.index > 0, tour.index <= tour.beats.count {
                 let beat = tour.beats[tour.index - 1]
-                let point = CGPoint(x: geo.size.width * beat.anchor.x,
-                                    y: geo.size.height * beat.anchor.y)
+                let origin = geo.frame(in: .global).origin
+                let hole: CGRect? = beat.target
+                    .flatMap { MenuHover.shared.frame($0) }
+                    .map { CGRect(x: $0.minX - origin.x, y: $0.minY - origin.y,
+                                  width: $0.width, height: $0.height).insetBy(dx: -8, dy: -8) }
+                let centre = hole.map { CGPoint(x: $0.midX, y: $0.midY) }
+                    ?? CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
+
                 ZStack(alignment: .topLeading) {
-                    Color.black.opacity(0.14)
-                        .ignoresSafeArea()
-                        .onTapGesture { withAnimation(.easeInOut(duration: 0.3)) { tour.next() } }
+                    Spotlight(hole: hole)
+                        .allowsHitTesting(hole == nil)
 
-                    // the pointer, bobbing on the thing it is describing
-                    Image(systemName: "cursorarrow")
-                        .font(.system(size: 22, weight: .regular))
-                        .foregroundStyle(.white)
-                        .shadow(color: .black.opacity(0.6), radius: 4, y: 1)
-                        .position(point)
-                        .allowsHitTesting(false)
-                        .modifier(Bob())
+                    Callout(beat: beat,
+                            step: tour.index,
+                            total: tour.beats.count,
+                            onNext: { withAnimation(.easeInOut(duration: 0.28)) { tour.next() } },
+                            onBack: { withAnimation(.easeInOut(duration: 0.28)) { tour.back() } },
+                            onSkip: { tour.finish() })
+                        .position(Callout.position(near: centre, in: geo.size))
+                        .animation(.easeInOut(duration: 0.28), value: tour.index)
 
-                    VStack(alignment: .leading, spacing: 7) {
-                        Text(beat.title)
-                            .font(AppBrand.uiFont(14, weight: .semibold))
-                            .foregroundStyle(.white)
-                        Text(beat.body)
-                            .font(AppBrand.uiFont(12.5))
-                            .foregroundStyle(.white.opacity(0.62))
-                            .fixedSize(horizontal: false, vertical: true)
-                        HStack(spacing: 10) {
-                            Text("\(tour.index) of \(tour.beats.count)")
-                                .font(AppBrand.uiFont(10.5))
-                                .foregroundStyle(.white.opacity(0.32))
-                            Spacer()
-                            Button("Skip") { tour.finish() }
-                                .buttonStyle(.plain)
-                                .font(AppBrand.uiFont(11.5))
-                                .foregroundStyle(.white.opacity(0.45))
-                            Button(tour.index == tour.beats.count ? "Done" : "Next") {
-                                withAnimation(.easeInOut(duration: 0.3)) { tour.next() }
-                            }
-                            .buttonStyle(.plain)
-                            .font(AppBrand.uiFont(11.5, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.9))
-                        }
-                        .padding(.top, 3)
+                    if let hole, beat.target != nil {
+                        // a quiet ring on the control itself, no cursor hijack
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.55), lineWidth: 1.5)
+                            .frame(width: hole.width, height: hole.height)
+                            .position(centre)
+                            .allowsHitTesting(false)
+                            .animation(.easeInOut(duration: 0.28), value: tour.index)
                     }
-                    .padding(16)
-                    .frame(width: 284, alignment: .leading)
-                    .background(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .fill(.ultraThinMaterial)
-                            .environment(\.colorScheme, .dark)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .strokeBorder(.white.opacity(0.16), lineWidth: 1)
-                    )
-                    .overlay(alignment: .top) {
-                        // the arrow that makes it clear what is being described
-                        UpArrow()
-                            .fill(.white.opacity(0.16))
-                            .frame(width: 16, height: 8)
-                            .offset(y: -8)
-                    }
-                    .shadow(color: .black.opacity(0.5), radius: 24, y: 10)
-                    .position(x: max(170, min(geo.size.width - 170, point.x + 40)),
-                              y: min(geo.size.height - 90, point.y + 96))
                 }
-                .transition(.opacity)
             }
         }
     }
+}
 
-    private struct UpArrow: Shape {
-        func path(in r: CGRect) -> Path {
-            var p = Path()
-            p.move(to: CGPoint(x: r.midX, y: r.minY))
-            p.addLine(to: CGPoint(x: r.maxX, y: r.maxY))
-            p.addLine(to: CGPoint(x: r.minX, y: r.maxY))
-            p.closeSubpath()
-            return p
-        }
-    }
+/// Dims everything except the hole. destinationOut punches the hole in the dim
+/// layer, so the control underneath stays at full brightness and stays clickable.
+private struct Spotlight: View {
+    let hole: CGRect?
 
-    private struct Bob: ViewModifier {
-        @StateObject private var s = BobState()
-        func body(content: Content) -> some View {
-            content.offset(y: s.up ? -3 : 3)
-                .onAppear {
-                    withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
-                        s.up = true
-                    }
+    var body: some View {
+        Rectangle()
+            .fill(Color.black.opacity(0.55))
+            .overlay {
+                if let hole {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .frame(width: hole.width, height: hole.height)
+                        .position(x: hole.midX, y: hole.midY)
+                        .blendMode(.destinationOut)
                 }
-        }
+            }
+            .compositingGroup()
+            .ignoresSafeArea()
+    }
+}
+
+private struct Callout: View {
+    let beat: VisionTour.Beat
+    let step: Int
+    let total: Int
+    let onNext: () -> Void
+    let onBack: () -> Void
+    let onSkip: () -> Void
+
+    static func position(near point: CGPoint, in size: CGSize) -> CGPoint {
+        let w: CGFloat = 292, h: CGFloat = 150
+        var x = point.x + w / 2 + 28
+        if x + w / 2 > size.width - 16 { x = point.x - w / 2 - 28 }
+        x = min(max(x, w / 2 + 16), size.width - w / 2 - 16)
+        let y = min(max(point.y + 24, h / 2 + 16), size.height - h / 2 - 16)
+        return CGPoint(x: x, y: y)
     }
 
-    private final class BobState: ObservableObject {
-        @Published var up = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(beat.title)
+                .font(AppBrand.uiFont(14, weight: .semibold))
+                .foregroundStyle(.white)
+            Text(beat.body)
+                .font(AppBrand.uiFont(12.5))
+                .foregroundStyle(.white.opacity(0.66))
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 12) {
+                Text("\(step) of \(total)")
+                    .font(AppBrand.uiFont(10.5))
+                    .foregroundStyle(.white.opacity(0.34))
+                Spacer()
+                if step > 1 {
+                    Button("Back", action: onBack)
+                        .buttonStyle(.plain)
+                        .font(AppBrand.uiFont(11.5))
+                        .foregroundStyle(.white.opacity(0.5))
+                }
+                Button("Skip", action: onSkip)
+                    .buttonStyle(.plain)
+                    .font(AppBrand.uiFont(11.5))
+                    .foregroundStyle(.white.opacity(0.5))
+                Button(step == total ? "Got it" : "Next", action: onNext)
+                    .buttonStyle(.plain)
+                    .font(AppBrand.uiFont(11.5, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+            .padding(.top, 2)
+        }
+        .padding(16)
+        .frame(width: 292, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.ultraThinMaterial))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .strokeBorder(.white.opacity(0.16), lineWidth: 1))
+        .shadow(color: .black.opacity(0.5), radius: 24, y: 10)
+    }
+}
+
+/// Shown when there is nothing on the workspace yet: a hand dragging out a new
+/// vision and letting go, so the gesture is obvious before it is tried.
+private struct EmptyDragHint: View {
+    @StateObject private var s = DragAnim()
+
+    var body: some View {
+        VStack(spacing: 12) {
+            ZStack(alignment: .topLeading) {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(.white.opacity(0.28), style: StrokeStyle(lineWidth: 1.5, dash: [6, 5]))
+                    .frame(width: s.width, height: s.height)
+                Image(systemName: "cursorarrow")
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .offset(x: s.width - 4, y: s.height - 4)
+            }
+            .frame(width: 260, height: 170, alignment: .topLeading)
+
+            Text("Drag out a space")
+                .font(AppBrand.uiFont(13, weight: .medium))
+                .foregroundStyle(.white.opacity(0.55))
+        }
+        .allowsHitTesting(false)
+        .onAppear { s.run() }
+    }
+
+    @MainActor
+    private final class DragAnim: ObservableObject {
+        @Published var width: CGFloat = 30
+        @Published var height: CGFloat = 22
+
+        func run() {
+            step()
+        }
+
+        private func step() {
+            width = 30; height = 22
+            withAnimation(.easeInOut(duration: 1.0)) { width = 240; height = 150 }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                guard let self else { return }
+                withAnimation(.easeOut(duration: 0.6)) { self.width = 30; self.height = 22 }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { self.step() }
+            }
+        }
     }
 }
