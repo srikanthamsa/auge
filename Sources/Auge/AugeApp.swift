@@ -63,9 +63,22 @@ enum AppBrand {
     /// up without another change.
     @MainActor
     static func uiFont(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
-        for name in ["GoogleSans-Regular", "Google Sans", "GoogleSans", "ProductSans-Regular"] {
-            if NSFont(name: name, size: size) != nil { return .custom(name, size: size) }
+        // Google Sans and Product Sans are proprietary and are not installed on
+        // this Mac, so the closest shipping geometric face stands in until the
+        // file is dropped into the bundle.
+        for name in ["GoogleSans-Regular", "Google Sans", "GoogleSans",
+                     "ProductSans-Regular", "Product Sans"] where NSFont(name: name, size: size) != nil {
+            return .custom(name, size: size)
         }
+        let avenir: String
+        switch weight {
+        case .bold, .heavy, .black: avenir = "AvenirNext-Bold"
+        case .semibold:             avenir = "AvenirNext-DemiBold"
+        case .medium:               avenir = "AvenirNext-Medium"
+        case .light, .thin, .ultraLight: avenir = "AvenirNext-Regular"
+        default:                    avenir = "AvenirNext-Regular"
+        }
+        if let f = NSFont(name: avenir, size: size) { return Font(f) }
         return .system(size: size, weight: weight)
     }
 
