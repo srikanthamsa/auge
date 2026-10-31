@@ -7569,12 +7569,14 @@ final class VisionTour: ObservableObject {
 
 private struct VisionTourOverlay: View {
     @StateObject private var tour = VisionTour.shared
+    @StateObject private var tick = FrameTick()
 
     var body: some View {
         GeometryReader { geo in
             if tour.index > 0, tour.index <= tour.beats.count {
                 let beat = tour.beats[tour.index - 1]
                 let origin = geo.frame(in: .global).origin
+                let stamp = tick.now               // re-reads the registry each tick
                 let hole: CGRect? = beat.target
                     .flatMap { MenuHover.shared.frame($0) }
                     .map { CGRect(x: $0.minX - origin.x, y: $0.minY - origin.y,
@@ -7584,6 +7586,7 @@ private struct VisionTourOverlay: View {
 
                 ZStack(alignment: .topLeading) {
                     Spotlight(hole: hole)
+                        .id(stamp)                      // stateless: safe to rebuild
                         .allowsHitTesting(hole == nil)
 
                     Callout(beat: beat,
@@ -7653,8 +7656,12 @@ private struct Callout: View {
             Text(beat.title)
                 .font(AppBrand.uiFont(14, weight: .semibold))
                 .foregroundStyle(.white)
-            if beat.title.hasPrefix("Bring anything") {
-                DragDemo()
+            if step == 1 {
+                FnPeekDemo()
+            } else if step == 2 {
+                PinDemo()
+            } else if step == 3 {
+                AreaSelectDemo()
                     .padding(.vertical, 4)
             }
             Text(beat.body)
@@ -7743,47 +7750,255 @@ private struct EmptyDragHint: View {
 /// Illustrates the second way in: a page is picked up, carried on a dotted path
 /// and dropped into empty workspace. Nothing is created.
 @MainActor
-private struct DragDemo: View {
-    @StateObject private var s = DragState()
+private final class FrameTick: ObservableObject {
+    @Published var now = Date()
+    private var timer: Timer?
+    init() {
+        timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.now = Date() }
+        }
+    }
+}
+
+/// Step 1: Fn down, workspace appears, Fn up, workspace goes. Twice.
+private struct FnPeekDemo: View {
+    @StateObject private var s = FnState()
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            Path { p in
-                p.move(to: CGPoint(x: 34, y: 20))
-                p.addQuadCurve(to: CGPoint(x: 158, y: 54), control: CGPoint(x: 96, y: 8))
+        HStack(spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(.white.opacity(s.down ? 0.26 : 0.12))
+                    .frame(width: 40, height: 30)
+                Text("fn")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.9))
             }
-            .stroke(.white.opacity(0.22), style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
-            .frame(width: 200, height: 74)
+            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .strokeBorder(.white.opacity(0.22), lineWidth: 1))
 
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(.white.opacity(0.14))
-                .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .strokeBorder(.white.opacity(0.25), lineWidth: 1))
-                .frame(width: 46, height: 30)
-                .offset(x: s.dropped ? 132 : 8, y: s.dropped ? 40 : 6)
-                .scaleEffect(s.dropped ? 1.0 : 0.92)
-                .animation(.easeInOut(duration: 1.3), value: s.dropped)
+            Image(systemName: "arrow.right")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.3))
 
-            Image(systemName: "cursorarrow")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(.white.opacity(0.9))
-                .offset(x: (s.dropped ? 132 : 8) + 34, y: (s.dropped ? 40 : 6) + 20)
-                .animation(.easeInOut(duration: 1.3), value: s.dropped)
+            ZStack {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(.white.opacity(s.shown ? 0.18 : 0.05))
+                    .frame(width: 118, height: 66)
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(.white.opacity(s.shown ? 0.45 : 0.16), lineWidth: 1))
+                HStack(spacing: 5) {
+                    ForEach(0..<3, id: \.self) { i in
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .fill(.white.opacity(s.shown ? 0.35 : 0.08))
+                            .frame(width: 30, height: 40)
+                            .animation(.easeOut(duration: 0.35).delay(Double(i) * 0.05), value: s.shown)
+                    }
+                }
+            }
         }
-        .frame(width: 200, height: 78)
+        .frame(width: 210, height: 74)
         .onAppear { s.run() }
     }
 
     @MainActor
-    private final class DragState: ObservableObject {
+    private final class FnState: ObservableObject {
+        @Published var down = false
+        @Published var shown = false
+        private var cycles = 0
+
+        func run() { cycle() }
+
+        private func cycle() {
+            down = true
+            withAnimation(.easeOut(duration: 0.35)) { shown = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                guard let self else { return }
+                self.down = false
+                withAnimation(.easeIn(duration: 0.4)) { self.shown = false }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) {
+                    self.cycles += 1
+                    self.cycle()
+                }
+            }
+        }
+    }
+}
+
+/// Step 2: Fn held, pin clicked, Fn released, workspace stays. Then Esc and ×.
+private struct PinDemo: View {
+    @StateObject private var s = PinState()
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ZStack(alignment: .topTrailing) {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.white.opacity(0.14))
+                    .frame(width: 118, height: 66)
+
+                VStack(alignment: .trailing, spacing: 0) {
+                    ZStack {
+                        Circle()
+                            .fill(Color.white.opacity(s.pinned ? 0.85 : 0.12))
+                            .frame(width: 16, height: 16)
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 7, weight: .bold))
+                            .foregroundStyle(s.pinned ? Color.black.opacity(0.75) : Color.white.opacity(0.5))
+                    }
+                    .scaleEffect(s.highlightPin ? 1.15 : 1)
+                    Spacer()
+                    if s.showDismiss {
+                        HStack(spacing: 4) {
+                            badge("esc")
+                            badge("×")
+                        }
+                    }
+                }
+                .padding(5)
+
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(Color.white.opacity(s.pinned ? 0.5 : 0.2), lineWidth: 1)
+                    .frame(width: 118, height: 66)
+
+                if s.cursorVisible {
+                    Image(systemName: "cursorarrow")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.9))
+                        .offset(x: s.cursorAtPin ? -14 : -54, y: s.cursorAtPin ? 16 : 44)
+                }
+            }
+            .frame(width: 118, height: 66)
+
+            Image(systemName: "arrow.left")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.3))
+
+            Text("fn")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.9))
+                .frame(width: 40, height: 30)
+                .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Color.white.opacity(s.holdingFn ? 0.26 : 0.12)))
+                .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.22), lineWidth: 1))
+        }
+        .frame(width: 210, height: 74)
+        .onAppear { s.run() }
+    }
+
+    private func badge(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 8, weight: .medium))
+            .foregroundStyle(Color.white.opacity(0.75))
+            .padding(.horizontal, 4).padding(.vertical, 2)
+            .background(RoundedRectangle(cornerRadius: 3).fill(Color.white.opacity(0.14)))
+    }
+
+    @MainActor
+    private final class PinState: ObservableObject {
+        @Published var holdingFn = false
+        @Published var highlightPin = false
+        @Published var pinned = false
+        @Published var cursorVisible = false
+        @Published var cursorAtPin = false
+        @Published var showDismiss = false
+
+        func run() { step() }
+
+        private func step() {
+            holdingFn = true; cursorVisible = true; highlightPin = true
+            pinned = false; cursorAtPin = false; showDismiss = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                self?.cursorAtPin = true
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.pinned = true
+                self?.highlightPin = false
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.1) { [weak self] in
+                self?.holdingFn = false
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.9) { [weak self] in
+                withAnimation(.easeOut(duration: 0.3)) { self?.showDismiss = true }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.4) { [weak self] in
+                self?.cursorVisible = false
+                withAnimation(.easeOut(duration: 0.3)) { self?.showDismiss = false }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self?.step() }
+            }
+        }
+    }
+}
+
+/// Step 3: the real gesture. Cursor to empty workspace, mouse down, draw a
+/// rectangle diagonally, release, and a vision sits in those bounds.
+private struct AreaSelectDemo: View {
+    @StateObject private var s = AreaState()
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .fill(.white.opacity(0.04))
+                .frame(width: 206, height: 86)
+
+            if s.origin.x > 0 {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .strokeBorder(.white.opacity(s.dropped ? 0.5 : 0.65),
+                                  style: StrokeStyle(lineWidth: 1, dash: s.dropped ? [] : [4, 3]))
+                    .background(RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(.white.opacity(s.dropped ? 0.16 : 0.04)))
+                    .frame(width: s.rect.width, height: s.rect.height)
+                    .offset(x: s.rect.minX, y: s.rect.minY)
+            }
+
+            Image(systemName: "cursorarrow")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.white.opacity(0.9))
+                .offset(x: s.cursor.x + 2, y: s.cursor.y)
+                .opacity(s.cursorVisible ? 1 : 0)
+        }
+        .frame(width: 206, height: 86)
+        .onAppear { s.run() }
+    }
+
+    @MainActor
+    private final class AreaState: ObservableObject {
+        @Published var cursor = CGPoint(x: 100, y: 44)
+        @Published var cursorVisible = false
+        @Published var origin = CGPoint.zero
+        @Published var rect = CGRect.zero
         @Published var dropped = false
-        func run() { schedule() }
-        private func schedule() { tick() }
-        private func tick() {
-            dropped = false
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
-                self?.dropped = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { self?.tick() }
+
+        func run() { cycle() }
+
+        private func cycle() {
+            origin = .zero; rect = .zero; dropped = false
+            cursor = CGPoint(x: 100, y: 44)
+            cursorVisible = false
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.cursorVisible = true
+                self?.cursor = CGPoint(x: 26, y: 20)      // move to empty space
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                guard let self else { return }
+                self.origin = CGPoint(x: 30, y: 24)       // mouse down
+                self.cursor = CGPoint(x: 44, y: 34)
+                self.rect = CGRect(x: 30, y: 24, width: 14, height: 10)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                guard let self else { return }
+                self.cursor = CGPoint(x: 168, y: 62)      // drag diagonally
+                self.rect = CGRect(x: 30, y: 24, width: 138, height: 38)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) { [weak self] in
+                withAnimation(.easeOut(duration: 0.25)) { self?.dropped = true }   // release
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.2) { [weak self] in
+                self?.cursorVisible = false
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) { [weak self] in
+                self?.cycle()
             }
         }
     }
