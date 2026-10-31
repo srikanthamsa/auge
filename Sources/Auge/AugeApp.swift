@@ -7570,6 +7570,7 @@ final class VisionTour: ObservableObject {
 private struct VisionTourOverlay: View {
     @StateObject private var tour = VisionTour.shared
     @StateObject private var tick = FrameTick()
+    @StateObject private var fit = CardFit()
 
     var body: some View {
         GeometryReader { geo in
@@ -7594,8 +7595,9 @@ private struct VisionTourOverlay: View {
                             total: tour.beats.count,
                             onNext: { withAnimation(.easeInOut(duration: 0.28)) { tour.next() } },
                             onBack: { withAnimation(.easeInOut(duration: 0.28)) { tour.back() } },
-                            onSkip: { tour.finish() })
-                        .position(Callout.position(below: hole, fallback: centre, in: geo.size))
+                            onSkip: { tour.finish() },
+                            onSize: { fit.size = $0 })
+                        .position(Callout.position(below: hole, fallback: centre, in: geo.size, card: fit.size))
                         .animation(.easeInOut(duration: 0.28), value: tour.index)
 
                     if let hole, beat.target != nil {
@@ -7634,6 +7636,10 @@ private struct Spotlight: View {
     }
 }
 
+private final class CardFit: ObservableObject {
+    @Published var size = CGSize(width: 292, height: 190)
+}
+
 private struct Callout: View {
     let beat: VisionTour.Beat
     let step: Int
@@ -7641,12 +7647,16 @@ private struct Callout: View {
     let onNext: () -> Void
     let onBack: () -> Void
     let onSkip: () -> Void
+    let onSize: (CGSize) -> Void
 
     /// Always sits under the control it describes, never above it: a top-bar
     /// control has no room overhead.
-    static func position(below hole: CGRect?, fallback: CGPoint, in size: CGSize) -> CGPoint {
-        let w: CGFloat = 292, h: CGFloat = 168
-        guard let hole else { return fallback }
+    static func position(below hole: CGRect?, fallback: CGPoint, in size: CGSize,
+                         card: CGSize) -> CGPoint {
+        let w = max(card.width, 292), h = max(card.height, 120)
+        guard let hole else {
+            return CGPoint(x: size.width / 2, y: min(fallback.y, size.height - h / 2 - 16))
+        }
         var x = hole.midX
         x = min(max(x, w / 2 + 16), size.width - w / 2 - 16)
         let y = hole.maxY + 12 + h / 2
@@ -7693,11 +7703,17 @@ private struct Callout: View {
             .padding(.top, 2)
         }
         .padding(16)
-        .frame(width: 292, height: 168, alignment: .topLeading)
+        .frame(width: 292, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
         .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.ultraThinMaterial))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
             .strokeBorder(.white.opacity(0.16), lineWidth: 1))
         .shadow(color: .black.opacity(0.5), radius: 24, y: 10)
+        .background(GeometryReader { g in
+            Color.clear
+                .onAppear { onSize(g.size) }
+                .onChange(of: g.size) { _, new in onSize(new) }
+        })
     }
 }
 
