@@ -3017,6 +3017,7 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     }
 
     func setPicking(_ picking: Bool) {
+        debugLog("setPicking(entry) \(picking) was=\(isPickingElements)")
         isPickingElements = picking
         guard let webView else { return }
         if picking {
@@ -7279,20 +7280,6 @@ private struct ConfigureWidgetOverlay: View {
                                 .padding(.horizontal, 11).padding(.vertical, 5.5)
                                 .background(.white.opacity(0.12), in: Capsule())
                                 .overlay(Capsule().strokeBorder(.white.opacity(0.08), lineWidth: 0.5))
-                                .background {
-                                    GeometryReader { proxy in
-                                        Color.clear
-                                            .onAppear {
-                                                MenuHover.shared.setAction("zp:" + site.id.uuidString) {
-                                                    site.setPicking(!site.isPickingElements)
-                                                }
-                                                MenuHover.shared.register("zp:" + site.id.uuidString, proxy.frame(in: .global))
-                                            }
-                                            .onChange(of: proxy.frame(in: .global)) { _, new in
-                                                MenuHover.shared.register("zp:" + site.id.uuidString, new)
-                                            }
-                                    }
-                                }
                             }.buttonStyle(.plain)
                         }
 
