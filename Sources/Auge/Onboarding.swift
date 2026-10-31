@@ -96,12 +96,24 @@ final class OnboardingAudio {
     private let fadeOut: TimeInterval = 6
 
     func play() {
-        guard player == nil, let url else { return }
-        guard let p = try? AVAudioPlayer(contentsOf: url) else { return }
+        guard player == nil else { debugLog("audio: already playing"); return }
+        guard let url else { debugLog("audio: no file in bundle"); return }
+        debugLog("audio: loading \(url.lastPathComponent)")
+        do {
+            let p = try AVAudioPlayer(contentsOf: url)
+            p.prepareToPlay()
+            start(p)
+        } catch {
+            debugLog("audio: failed \(error)")
+        }
+    }
+
+    private func start(_ p: AVAudioPlayer) {
+        debugLog("audio: duration \(p.duration)")
         p.numberOfLoops = 0
         p.volume = 0.5
         p.currentTime = 0
-        p.play()
+        debugLog("audio: play -> \(p.play())")
         player = p
         let clipLength = clip
         let fade = fadeOut
@@ -283,7 +295,7 @@ private struct OnboardingView: View {
                 ChoiceScene(prompt: "How many tabs are open right now?",
                             options: [AnswerOption(title: "A sensible few", subtitle: "I keep things organised.", symbol: "square.stack.3d.up"),
                                       AnswerOption(title: "Too many to count", subtitle: "It's getting out of hand.", symbol: "rectangle.stack"),
-                                      AnswerOption(title: "Don't ask", subtitle: "We don't talk about that.", symbol: "eye.slash")],
+                                      AnswerOption(title: "Don't ask", subtitle: "We don't talk about that.", symbol: "hand.raised")],
                             pick: { state.tabAnswer = $0; advance() })
             case .habitQuestion:
                 ChoiceScene(prompt: "And how often do you go looking?",
@@ -306,7 +318,7 @@ private struct OnboardingView: View {
             case .practice:
                 practiceScene
             case .letGo:
-                SceneText(lines: ["You let go.", "That's the point."], size: 52)
+                SceneText(lines: ["You let go.", "Don't worry, we all do at some point."], size: 50)
             case .done:
                 doneScene
             }
@@ -438,7 +450,7 @@ private struct OnboardingView: View {
                     .foregroundStyle(.white, Color(red: 0.26, green: 0.92, blue: 0.52))
                     .shadow(color: Color(red: 0.30, green: 1.0, blue: 0.58).opacity(0.9), radius: 14)
             }
-            SceneText(lines: ["You're all set."], size: 34)
+            SceneText(lines: ["New ability unlocked.", "See Beyond."], size: 40)
             Text("Hold \(state.shortcut) anywhere to peek.")
                 .font(AppBrand.uiFont(14)).foregroundStyle(.white.opacity(0.5))
             GlowButton(title: "See Beyond") { onFinish() }
@@ -615,6 +627,14 @@ private struct Bloom: View {
 
 /// One beat where the person actually answers, so the film has a decision in it
 /// instead of seven straight reads.
+/// Slow blink, and a fade out after the last line.
+private func labelOpacity(_ t: TimeInterval) -> Double {
+    let inOpacity = min(1, max(0, (t - 0.55) / 0.7))
+    let blink = 0.62 + 0.38 * (0.5 + 0.5 * cos(t * 2.0))
+    let out = t > 4.4 ? max(0, 1 - (t - 4.4) / 0.9) : 1
+    return inOpacity * blink * out
+}
+
 /// The mark rises over the spreading stain as it fills.
 private struct BloomMark: View {
     let start: Date
@@ -635,6 +655,16 @@ private struct BloomMark: View {
             .shadow(color: .white.opacity(0.7), radius: 54)
             .opacity(shown)
             .scaleEffect(0.92 + shown * 0.08)
+            .overlay(alignment: .bottom) {
+                Text(t < 2.2 ? "Keep holding." : "Don't let go.")
+                    .font(AppBrand.uiFont(19, weight: .medium))
+                    .tracking(0.4)
+                    .foregroundStyle(.white)
+                    .fixedSize()
+                    .offset(y: 74)
+                    .opacity(labelOpacity(t))
+                    .animation(.easeInOut(duration: 0.35), value: t < 2.2)
+            }
         }
     }
 }
