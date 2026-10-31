@@ -3105,7 +3105,53 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     func zap(at point: CGPoint) {
         let x = Int(point.x.rounded()), y = Int(point.y.rounded())
         guard x >= 0, y >= 0, x <= Int(size.width), y <= Int(size.height) else { return }
-        webView?.evaluateJavaScript("window.__seeZapper && window.__seeZapper.zapAt(\(x), \(y));", completionHandler: nil)
+        // If the page's zapper never installed, this used to do nothing at all and
+        // the click looked ignored. Fall back to building the selector here and
+        // storing it in the site config, which the panel already knows how to show.
+        let js = """
+        (function(){
+          try {
+            if (window.__seeZapper && window.__seeZapper.zapAt) {
+              window.__seeZapper.zapAt(\(x), \(y));
+              return 'zapper';
+            }
+            var el = document.elementFromPoint(\(x), \(y));
+            if (!el || el === document.body || el === document.documentElement) { return 'none'; }
+            function part(node) {
+              var base = node.nodeName.toLowerCase();
+              if (node.id) { return base + '#' + node.id; }
+              var cls = (node.classList && node.classList.length) ? '.' + Array.prototype.slice.call(node.classList).slice(0,2).join('.') : '';
+              var parent = node.parentNode;
+              if (!parent) { return base + cls; }
+              var index = 1;
+              for (var sib = node.previousElementSibling; sib; sib = sib.previousElementSibling) {
+                if (sib.nodeName === node.nodeName) { index++; }
+              }
+              return base + cls + ':nth-of-type(' + index + ')';
+            }
+            var parts = [], node = el;
+            for (var i = 0; i < 4 && node && node.nodeName !== 'BODY'; i++) {
+              parts.unshift(part(node));
+              node = node.parentElement;
+            }
+            return parts.join(' > ');
+          } catch (e) { return 'error:' + e; }
+        })();
+        """
+        webView?.evaluateJavaScript(js) { [weak self] value, error in
+            guard let self else { return }
+            guard let result = value as? String, error == nil else {
+                debugLog("zap failed err=\(String(describing: error))")
+                return
+            }
+            debugLog("zap result=\(result)")
+            guard result != "zapper", result != "none", !result.hasPrefix("error:") else { return }
+            if !self.config.hiddenSelectors.contains(result) {
+                self.config.hiddenSelectors.append(result)
+            }
+            self.applyHiddenSelectors()
+            self.applyTuning(reload: false)
+        }
     }
 
     /// A third-party sign-in button was pressed. Record it so the surface can
