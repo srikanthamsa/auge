@@ -48,16 +48,18 @@ enum AppBrand {
     /// Resources and it is registered at launch and used automatically.
     @MainActor
     static func registerBundledFonts() {
-        guard let urls = Bundle.main.urls(forResourcesWithExtension: nil, subdirectory: nil) else { return }
-        for url in urls where ["ttf", "otf"].contains(url.pathExtension.lowercased()) {
-            CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
-            debugLog("font registered \(url.lastPathComponent)")
+        guard let dir = Bundle.main.resourceURL,
+              let items = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return }
+        for url in items where ["ttf", "otf"].contains(url.pathExtension.lowercased()) {
+            var error: Unmanaged<CFError>?
+            let ok = CTFontManagerRegisterFontsForURL(url as CFURL, .process, &error)
+            debugLog("font \(url.lastPathComponent) registered=\(ok)")
         }
     }
 
     @MainActor
     static func displayFont(_ size: CGFloat, fallbackWeight: Font.Weight = .bold) -> Font {
-        let candidates = ["Courages", "Courages-Regular", "Courages Regular"]
+        let candidates = ["COURAGESDEMORegular", "COURAGES DEMO", "CouragesDemo", "Courages"]
         for name in candidates where NSFont(name: name, size: size) != nil {
             return .custom(name, size: size)
         }
