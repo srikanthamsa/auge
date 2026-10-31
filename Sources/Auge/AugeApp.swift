@@ -3021,7 +3021,21 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         guard let webView else { return }
         if picking {
             exitChromeMode()
-            webView.evaluateJavaScript("window.__seeZapper && window.__seeZapper.enable();", completionHandler: nil)
+            // The picker script is only injected at load time, so entering pick
+            // mode on a page that is already loaded did nothing at all. Install it
+            // now when it is missing, then enable whichever engine is present.
+            let js = """
+            (function(){
+              try {
+                if (!window.__seePickerClick) { \(PageScripts.picker) }
+                if (window.__seeZapper && window.__seeZapper.enable) { window.__seeZapper.enable(); return 'zapper'; }
+                return window.__seePickerClick ? 'picker' : 'none';
+              } catch (e) { return 'error:' + e; }
+            })();
+            """
+            webView.evaluateJavaScript(js) { value, error in
+                debugLog("pick start -> \(String(describing: value)) err=\(String(describing: error))")
+            }
         } else {
             // Ask the page for its list as the picking session ends: the page's
             // own post on each zap is not reliable, and this is the moment the
