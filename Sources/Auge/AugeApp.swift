@@ -57,6 +57,17 @@ enum AppBrand {
         }
     }
 
+    /// Google Sans when it is installed, otherwise the system face. Any font
+    /// dropped into the app Resources is registered at launch, so this picks it
+    /// up without another change.
+    @MainActor
+    static func uiFont(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
+        for name in ["GoogleSans-Regular", "Google Sans", "GoogleSans", "ProductSans-Regular"] {
+            if NSFont(name: name, size: size) != nil { return .custom(name, size: size) }
+        }
+        return .system(size: size, weight: weight)
+    }
+
     @MainActor
     static func displayFont(_ size: CGFloat, fallbackWeight: Font.Weight = .bold) -> Font {
         let candidates = ["COURAGESDEMORegular", "COURAGES DEMO", "CouragesDemo", "Courages"]

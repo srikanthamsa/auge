@@ -217,6 +217,8 @@ private struct OnboardingView: View {
                 if let start = state.holdStart, let origin = state.keyOrigin {
                     Bloom(start: start, origin: origin, stage: geo.size)
                         .allowsHitTesting(false)
+                    BloomMark(start: start)
+                        .allowsHitTesting(false)
                 }
                 cursorLayer(geo)
                 chrome
@@ -280,7 +282,7 @@ private struct OnboardingView: View {
             case .introducing:
                 introduceScene
             case .promise:
-                SceneText(lines: ["Every window.", "Every tab.", "One gesture away."], size: 60)
+                SceneText(lines: ["Every window. Every tab.", "One gesture away."], size: 58)
             case .practice:
                 practiceScene
             case .done:
@@ -305,7 +307,7 @@ private struct OnboardingView: View {
                     .animation(.spring(response: 1.1, dampingFraction: 0.82), value: ui.appeared)
             }
             Text("Introducing")
-                .font(.system(size: 15, weight: .medium))
+                .font(AppBrand.uiFont(15, weight: .medium))
                 .tracking(5.5)
                 .foregroundStyle(.white.opacity(0.5))
                 .textCase(.uppercase)
@@ -314,7 +316,7 @@ private struct OnboardingView: View {
                 .tracking(3)
                 .foregroundStyle(.white)
             Text("See Beyond.")
-                .font(.system(size: 15, weight: .medium))
+                .font(AppBrand.uiFont(15, weight: .medium))
                 .tracking(2.4)
                 .foregroundStyle(.white.opacity(0.55))
         }
@@ -350,7 +352,7 @@ private struct OnboardingView: View {
             .opacity(state.holdStart == nil ? 1 : 0.25)
             SceneText(lines: ["Press and hold \(state.shortcut)"], size: 40)
             Text("Hold it, and keep holding.")
-                .font(.system(size: 13)).foregroundStyle(.white.opacity(0.38))
+                .font(AppBrand.uiFont(13)).foregroundStyle(.white.opacity(0.38))
         }
     }
 
@@ -416,7 +418,7 @@ private struct OnboardingView: View {
             }
             SceneText(lines: ["You're all set."], size: 34)
             Text("Hold \(state.shortcut) anywhere to peek.")
-                .font(.system(size: 14)).foregroundStyle(.white.opacity(0.5))
+                .font(AppBrand.uiFont(14)).foregroundStyle(.white.opacity(0.5))
             GlowButton(title: "See Beyond") { onFinish() }
                 .padding(.top, 14)
         }
@@ -591,6 +593,28 @@ private struct Bloom: View {
 
 /// One beat where the person actually answers, so the film has a decision in it
 /// instead of seven straight reads.
+/// The mark rises over the spreading stain as it fills.
+private struct BloomMark: View {
+    let start: Date
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30)) { context in
+            let t = context.date.timeIntervalSince(start)
+            let shown = min(1, max(0, (t - 0.35) / 1.1))
+            Group {
+                if let icon = AppBrand.icon {
+                    Image(nsImage: icon).resizable().interpolation(.high)
+                } else {
+                    Text("Auge").font(AppBrand.displayFont(96)).foregroundStyle(.white)
+                }
+            }
+            .frame(width: 132, height: 132)
+            .opacity(shown)
+            .scaleEffect(0.92 + shown * 0.08)
+        }
+    }
+}
+
 private struct ChoiceScene: View {
     let prompt: String
     let options: [String]
@@ -651,7 +675,7 @@ private struct ChoiceScene: View {
                 }
             }
             Text("Pick one — you can change your mind later.")
-                .font(.system(size: 12)).foregroundStyle(.white.opacity(0.3))
+                .font(AppBrand.uiFont(12)).foregroundStyle(.white.opacity(0.3))
         }
         .onAppear {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { fade.shown = true }
@@ -724,7 +748,7 @@ private struct GlowButton: View {
             .shadow(color: Color(red: 0.34, green: 0.87, blue: 1).opacity(0.55), radius: 14)
             .overlay(
                 Text(title)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(AppBrand.uiFont(15, weight: .semibold))
                     .tracking(0.6)
                     .foregroundStyle(.white)
             )
@@ -746,7 +770,7 @@ private struct SceneText: View {
         VStack(spacing: 6) {
             ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
                 Text(line)
-                    .font(.system(size: size, weight: .semibold))
+                    .font(AppBrand.uiFont(size, weight: .semibold))
                     .tracking(-0.4)
                     .foregroundStyle(.white)
                     .multilineTextAlignment(.center)
