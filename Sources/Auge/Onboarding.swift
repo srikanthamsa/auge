@@ -625,58 +625,18 @@ private struct ChoiceScene: View {
     let options: [String]
     let pick: (Int) -> Void
     @StateObject private var fade = FadeIn()
-    @StateObject private var hover = ChoiceHover()
+    @StateObject private var gate = ChoiceGate()
 
     var body: some View {
-        VStack(spacing: 30) {
+        VStack(spacing: 34) {
             SceneText(lines: [prompt], size: 56)
-            HStack(spacing: 16) {
+            HStack(spacing: 18) {
                 ForEach(Array(options.enumerated()), id: \.offset) { index, option in
-                    // A tap, not a Button: buttons here were firing on their own
-                    // as the scene appeared, which answered the question for the
-                    // person. A tap needs an actual click.
-                    VStack(spacing: 10) {
-                        Image(systemName: OnboardingState.symbols[index % OnboardingState.symbols.count])
-                            .font(.system(size: 27, weight: .regular))
-                            .symbolRenderingMode(.hierarchical)
-                            .foregroundStyle(LinearGradient(colors: [.white, .white.opacity(0.55)],
-                                                            startPoint: .top, endPoint: .bottom))
-                            .frame(width: 52, height: 52)
-                            .background(
-                                Circle()
-                                    .fill(LinearGradient(colors: [.white.opacity(0.16), .white.opacity(0.04)],
-                                                         startPoint: .top, endPoint: .bottom))
-                            )
-                            .overlay(Circle().strokeBorder(.white.opacity(0.16), lineWidth: 1))
-                        Text(option)
-                            .font(.system(size: 15, weight: .semibold))
-                    }
-                    .frame(width: 172, height: 92)
-                    .foregroundStyle(.white.opacity(hover.hovered == index ? 1 : 0.82))
-                    .background(RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(.white.opacity(hover.hovered == index ? 0.16 : 0.07)))
-                    .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .strokeBorder(.white.opacity(hover.hovered == index ? 0.4 : 0.14), lineWidth: 1))
-                    .scaleEffect(hover.hovered == index ? 1.03 : 1)
-                    .animation(.spring(response: 0.35, dampingFraction: 0.8), value: hover.hovered)
-                    .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    .onTapGesture { if hover.armed, hover.enteredAt[index] != nil { pick(index) } }
-                    .onHover { inside in
-                        hover.hovered = inside ? index : (hover.hovered == index ? nil : hover.hovered)
-                        // Leave a moment before accepting a tap, so the click that
-                        // brought the window forward cannot choose for them.
-                        if inside {
-                            if hover.enteredAt[index] == nil { hover.enteredAt[index] = Date() }
-                            if !hover.armed {
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { hover.armed = true }
-                            }
-                        } else {
-                            hover.enteredAt[index] = nil
-                        }
-                    }
-                    .opacity(fade.shown ? 1 : 0)
-                    .offset(y: fade.shown ? 0 : 18)
-                    .animation(.spring(response: 0.9, dampingFraction: 0.86), value: fade.shown)
+                    TiltCard(title: option) { if gate.armed { pick(index) } }
+                        .opacity(fade.shown ? 1 : 0)
+                        .offset(y: fade.shown ? 0 : 22)
+                        .animation(.spring(response: 0.9, dampingFraction: 0.86)
+                            .delay(Double(index) * 0.06), value: fade.shown)
                 }
             }
             Text("Pick one — you can change your mind later.")
@@ -684,19 +644,82 @@ private struct ChoiceScene: View {
         }
         .onAppear {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { fade.shown = true }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { hover.armed = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { gate.armed = true }
         }
     }
 }
 
-private final class ChoiceHover: ObservableObject {
-    @Published var hovered: Int?
-    @Published var armed = false
-    @Published var enteredAt: [Int: Date] = [:]
+private final class Lean: ObservableObject {
+    @Published var tilt = CGPoint.zero
+    @Published var hovered = false
 }
 
-/// The finishing button: the Uiverse swirl, recoloured cyan, drawn natively —
-/// a soft radial plate with blurred blobs drifting inside it and an inset rim.
+private final class ChoiceGate: ObservableObject {
+    @Published var armed = false
+}
+
+/// A card that leans toward the pointer: a gradient plate with a blurred copy of
+/// itself glowing behind, tilting on both axes with the pointer's position, so
+/// the card turns in your hand instead of only brightening.
+private struct TiltCard: View {
+    let title: String
+    let action: () -> Void
+    @StateObject private var lean = Lean()
+
+    private var gradient: LinearGradient {
+        LinearGradient(colors: [Color(red: 0.12, green: 0.64, blue: 1.0),
+                                Color(red: 0.48, green: 0.36, blue: 1.0),
+                                Color(red: 0.20, green: 0.86, blue: 0.92)],
+                       startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(gradient)
+                .blur(radius: lean.hovered ? 28 : 16)
+                .opacity(lean.hovered ? 0.8 : 0.3)
+                .scaleEffect(lean.hovered ? 1.04 : 0.96)
+
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(gradient)
+                .brightness(lean.hovered ? 0.06 : 0)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(LinearGradient(colors: [.white.opacity(0.20), .clear],
+                                             startPoint: .top, endPoint: .bottom))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(.white.opacity(0.30), lineWidth: 1)
+                )
+                .overlay(
+                    Text(title)
+                        .font(AppBrand.uiFont(17, weight: .semibold))
+                        .tracking(0.2)
+                        .foregroundStyle(.white)
+                        .shadow(color: .black.opacity(0.25), radius: 6, y: 1)
+                )
+        }
+        .frame(width: 178, height: 104)
+        .rotation3DEffect(.degrees(Double(lean.tilt.y) * -12), axis: (x: 1, y: 0, z: 0), perspective: 0.5)
+        .rotation3DEffect(.degrees(Double(lean.tilt.x) * 14), axis: (x: 0, y: 1, z: 0), perspective: 0.5)
+        .animation(.easeOut(duration: 0.13), value: lean.tilt)
+        .animation(.easeOut(duration: 0.2), value: lean.hovered)
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .onTapGesture { action() }
+        .onContinuousHover { phase in
+            switch phase {
+            case .active(let p):
+                lean.hovered = true
+                lean.tilt = CGPoint(x: (p.x - 0.5) * 2, y: (p.y - 0.5) * 2)
+            case .ended:
+                lean.hovered = false
+                lean.tilt = .zero
+            }
+        }
+    }
+}
 private struct GlowButton: View {
     let title: String
     let action: () -> Void
