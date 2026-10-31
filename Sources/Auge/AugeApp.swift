@@ -103,7 +103,8 @@ private final class AugeAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func statusItemClicked() {
-        if NSApp.currentEvent?.type == .rightMouseUp {
+        guard let button = statusItem?.button else { return }
+        if NSApp.currentEvent?.type == .rightMouseUp || NSApp.currentEvent?.modifierFlags.contains(.control) == true {
             let menu = NSMenu()
             menu.addItem(withTitle: "Play Introduction…", action: #selector(showIntroduction), keyEquivalent: "")
             menu.addItem(withTitle: "Show Workspace", action: #selector(togglePanel), keyEquivalent: "")
@@ -111,9 +112,12 @@ private final class AugeAppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(withTitle: "About Auge", action: #selector(showAbout), keyEquivalent: "")
             menu.addItem(withTitle: "Quit Auge", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
             for item in menu.items { item.target = self }
-            statusItem?.menu = menu
-            statusItem?.button?.performClick(nil)
-            statusItem?.menu = nil
+            // popUp, not performClick: giving the item a menu would swallow the
+            // next left click.
+            NSApp.activate(ignoringOtherApps: true)
+            menu.popUp(positioning: nil,
+                       at: NSPoint(x: 0, y: button.bounds.height + 6),
+                       in: button)
             return
         }
         togglePanel()

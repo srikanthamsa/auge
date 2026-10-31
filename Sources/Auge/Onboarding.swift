@@ -121,7 +121,7 @@ private final class OnboardingWindow: NSWindow {
 @MainActor
 final class OnboardingState: ObservableObject {
     enum Step: Int, CaseIterable {
-        case question, tabs, introducing, practice, done
+        case question, choice, answer, introducing, promise, practice, done
     }
     @Published var step: Step = .question
     @Published var shortcut = "Fn"
@@ -129,13 +129,33 @@ final class OnboardingState: ObservableObject {
     @Published var pressing = false
     @Published var muted = false
 
+    enum Choice: String, CaseIterable {
+        case windows, tabs, both
+        var title: String {
+            switch self {
+            case .windows: "Windows"
+            case .tabs: "Tabs"
+            case .both: "Honestly, both"
+            }
+        }
+        var symbol: String {
+            switch self {
+            case .windows: "macwindow.on.rectangle"
+            case .tabs: "rectangle.on.rectangle"
+            case .both: "square.stack.3d.up"
+            }
+        }
+    }
+    @Published var choice: Choice = .both
+
     /// Seconds each scene holds before the film moves on.
     func duration(of step: Step) -> Double? {
         switch step {
-        case .question: 3.6
-        case .tabs: 4.2
-        case .introducing: 3.6
-        default: nil
+        case .question: 4.6
+        case .answer: 4.6
+        case .introducing: 4.8
+        case .promise: 5.2
+        default: nil          // choice, practice and done wait for the person
         }
     }
 }
@@ -197,14 +217,19 @@ private struct OnboardingView: View {
         ZStack {
             switch state.step {
             case .question:
-                SceneText(lines: ["How do you reach the things", "that you check so often?"])
-            case .tabs:
-                VStack(spacing: 34) {
-                    SceneText(lines: ["By switching through tabs?"])
-                    TabStripMock()
-                }
+                SceneText(lines: ["How do you reach the things", "you check a hundred times a day?"], size: 40)
+            case .choice:
+                ChoiceScene(pick: { choice in
+                    state.choice = choice
+                    advance()
+                })
+            case .answer:
+                SceneText(lines: [state.choice == .both ? "So does everyone." : "Same here.",
+                                  "There is a faster way."], size: 42)
             case .introducing:
                 introduceScene
+            case .promise:
+                SceneText(lines: ["Every window.", "Every tab.", "One gesture away."], size: 46)
             case .practice:
                 practiceScene
             case .done:
@@ -223,19 +248,19 @@ private struct OnboardingView: View {
             if let icon = AppBrand.icon {
                 Image(nsImage: icon)
                     .resizable().interpolation(.high)
-                    .frame(width: 128, height: 128)
+                    .frame(width: 116, height: 116)
                     .shadow(color: Color(red: 0.45, green: 0.75, blue: 1).opacity(0.55), radius: 34)
                     .scaleEffect(ui.appeared ? 1 : 0.86)
                     .animation(.spring(response: 1.1, dampingFraction: 0.82), value: ui.appeared)
             }
             Text("Introducing")
-                .font(.system(size: 17, weight: .medium))
-                .tracking(3.2)
+                .font(.system(size: 15, weight: .medium))
+                .tracking(5.5)
                 .foregroundStyle(.white.opacity(0.5))
                 .textCase(.uppercase)
             Text("Auge.")
-                .font(.system(size: 68, weight: .semibold))
-                .tracking(-1.5)
+                .font(.system(size: 104, weight: .bold))
+                .tracking(3)
                 .foregroundStyle(.white)
             Text("See Beyond.")
                 .font(.system(size: 15, weight: .medium))
@@ -396,9 +421,6 @@ private struct OnboardingView: View {
         switch step {
         case .question:
             ui.cursor = CGPoint(x: 0.5, y: 0.62)
-        case .tabs:
-            withAnimation(.easeInOut(duration: 1.15)) { ui.cursor = CGPoint(x: 0.40, y: 0.66) }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { ui.cursorVisible = true }
         case .introducing:
             ui.cursorVisible = false
         default:
@@ -424,6 +446,56 @@ private struct OnboardingView: View {
             return event
         }
     }
+}
+
+/// One beat where the person actually answers, so the film has a decision in it
+/// instead of seven straight reads.
+private struct ChoiceScene: View {
+    let pick: (OnboardingState.Choice) -> Void
+    @StateObject private var fade = FadeIn()
+    @StateObject private var hover = ChoiceHover()
+
+    var body: some View {
+        VStack(spacing: 30) {
+            SceneText(lines: ["Which one is you?"], size: 38)
+            HStack(spacing: 16) {
+                ForEach(OnboardingState.Choice.allCases, id: \.self) { choice in
+                    Button {
+                        pick(choice)
+                    } label: {
+                        VStack(spacing: 10) {
+                            Image(systemName: choice.symbol)
+                                .font(.system(size: 26, weight: .light))
+                            Text(choice.title)
+                                .font(.system(size: 15, weight: .semibold))
+                        }
+                        .frame(width: 168, height: 132)
+                        .foregroundStyle(.white.opacity(hover.hovered == choice ? 1 : 0.82))
+                        .background(RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(.white.opacity(hover.hovered == choice ? 0.16 : 0.07)))
+                        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .strokeBorder(.white.opacity(hover.hovered == choice ? 0.4 : 0.14), lineWidth: 1))
+                        .scaleEffect(hover.hovered == choice ? 1.03 : 1)
+                        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: hover.hovered)
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { inside in
+                        hover.hovered = inside ? choice : (hover.hovered == choice ? nil : hover.hovered)
+                    }
+                    .opacity(fade.shown ? 1 : 0)
+                    .offset(y: fade.shown ? 0 : 18)
+                    .animation(.spring(response: 0.9, dampingFraction: 0.86), value: fade.shown)
+                }
+            }
+            Text("Pick one — you can change your mind later.")
+                .font(.system(size: 12)).foregroundStyle(.white.opacity(0.3))
+        }
+        .onAppear { DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { fade.shown = true } }
+    }
+}
+
+private final class ChoiceHover: ObservableObject {
+    @Published var hovered: OnboardingState.Choice?
 }
 
 // MARK: - Pieces
