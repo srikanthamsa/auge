@@ -88,8 +88,9 @@ private final class AugeAppDelegate: NSObject, NSApplicationDelegate {
         // this the eye rendered black on a dark menu bar.
         let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         statusItem?.button?.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-        statusItem?.button?.action = #selector(togglePanel)
+        statusItem?.button?.action = #selector(statusItemClicked)
         statusItem?.button?.target = self
+        statusItem?.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         statusItem?.button?.toolTip = "See Beyond."
         // First run: the introduction owns the screen; the workspace follows it.
         if !OnboardingController.shared.hasCompleted {
@@ -99,6 +100,23 @@ private final class AugeAppDelegate: NSObject, NSApplicationDelegate {
         PasskeyBridge.shared.start()
         AdBlocker.shared.prepare()
         showPanel()
+    }
+
+    @objc private func statusItemClicked() {
+        if NSApp.currentEvent?.type == .rightMouseUp {
+            let menu = NSMenu()
+            menu.addItem(withTitle: "Play Introduction…", action: #selector(showIntroduction), keyEquivalent: "")
+            menu.addItem(withTitle: "Show Workspace", action: #selector(togglePanel), keyEquivalent: "")
+            menu.addItem(.separator())
+            menu.addItem(withTitle: "About Auge", action: #selector(showAbout), keyEquivalent: "")
+            menu.addItem(withTitle: "Quit Auge", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+            for item in menu.items { item.target = self }
+            statusItem?.menu = menu
+            statusItem?.button?.performClick(nil)
+            statusItem?.menu = nil
+            return
+        }
+        togglePanel()
     }
 
     @objc private func showIntroduction() {

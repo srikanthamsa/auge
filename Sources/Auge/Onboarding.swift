@@ -121,7 +121,7 @@ private final class OnboardingWindow: NSWindow {
 @MainActor
 final class OnboardingState: ObservableObject {
     enum Step: Int, CaseIterable {
-        case question, windows, tabs, introducing, practice, shortcut, settings, access, done
+        case question, tabs, introducing, practice, done
     }
     @Published var step: Step = .question
     @Published var shortcut = "Fn"
@@ -132,11 +132,9 @@ final class OnboardingState: ObservableObject {
     /// Seconds each scene holds before the film moves on.
     func duration(of step: Step) -> Double? {
         switch step {
-        case .question: 3.4
-        case .windows: 3.8
-        case .tabs: 3.8
-        case .introducing: 3.4
-        case .settings: 4.0
+        case .question: 3.6
+        case .tabs: 4.2
+        case .introducing: 3.6
         default: nil
         }
     }
@@ -200,11 +198,6 @@ private struct OnboardingView: View {
             switch state.step {
             case .question:
                 SceneText(lines: ["How do you reach the things", "that you check so often?"])
-            case .windows:
-                VStack(spacing: 34) {
-                    SceneText(lines: ["By switching through windows?"])
-                    WindowSwitcherMock()
-                }
             case .tabs:
                 VStack(spacing: 34) {
                     SceneText(lines: ["By switching through tabs?"])
@@ -214,15 +207,6 @@ private struct OnboardingView: View {
                 introduceScene
             case .practice:
                 practiceScene
-            case .shortcut:
-                shortcutScene
-            case .settings:
-                VStack(spacing: 30) {
-                    SceneText(lines: ["Set it up how you work."])
-                    SettingsMock()
-                }
-            case .access:
-                accessScene
             case .done:
                 doneScene
             }
@@ -412,17 +396,11 @@ private struct OnboardingView: View {
         switch step {
         case .question:
             ui.cursor = CGPoint(x: 0.5, y: 0.62)
-        case .windows:
-            withAnimation(.easeInOut(duration: 1.15)) { ui.cursor = CGPoint(x: 0.455, y: 0.72) }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { ui.cursorVisible = true }
         case .tabs:
             withAnimation(.easeInOut(duration: 1.15)) { ui.cursor = CGPoint(x: 0.40, y: 0.66) }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { ui.cursorVisible = true }
         case .introducing:
             ui.cursorVisible = false
-        case .settings:
-            withAnimation(.easeInOut(duration: 1.2)) { ui.cursor = CGPoint(x: 0.685, y: 0.63) }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { ui.cursorVisible = true }
         default:
             ui.cursorVisible = false
         }
@@ -442,21 +420,6 @@ private struct OnboardingView: View {
             if state.step == .practice, mods.contains(.function) {
                 state.pressing = true
                 advance()
-            }
-            if state.step == .shortcut {
-                var parts: [String] = []
-                if mods.contains(.control) { parts.append("⌃") }
-                if mods.contains(.option) { parts.append("⌥") }
-                if mods.contains(.shift) { parts.append("⇧") }
-                if mods.contains(.command) { parts.append("⌘") }
-                if mods.contains(.function) { parts.append("Fn") }
-                if !parts.isEmpty {
-                    state.shortcut = parts.joined()
-                    state.recording = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
-                        if state.step == .shortcut { advance() }
-                    }
-                }
             }
             return event
         }
