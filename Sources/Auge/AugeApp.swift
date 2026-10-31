@@ -4832,7 +4832,7 @@ private struct SeeOverlay: View {
                 }.buttonStyle(.plain)
                 Button(action: onClose) {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 22, weight: .regular))
+                        .font(.system(size: 24, weight: .medium))
                         .symbolRenderingMode(.hierarchical)
                         .foregroundStyle(.secondary)
                         .frame(width: 34, height: 34)
@@ -7527,16 +7527,16 @@ final class VisionTour: ObservableObject {
     let beats: [Beat] = [
         Beat(title: "Pin what matters",
              body: "Pin keeps a site or vision resting on the workspace when you let go.",
-             anchor: CGPoint(x: 0.52, y: 0.10)),
+             anchor: CGPoint(x: 0.932, y: 0.048)),
         Beat(title: "Add anything",
              body: "Add brings in a website, a file, or one of the built-in visions.",
-             anchor: CGPoint(x: 0.60, y: 0.10)),
+             anchor: CGPoint(x: 0.898, y: 0.048)),
         Beat(title: "Right click a vision",
              body: "Right clicking opens what that vision can do: refresh, resize, remove.",
-             anchor: CGPoint(x: 0.50, y: 0.46)),
+             anchor: CGPoint(x: 0.50, y: 0.42)),
         Beat(title: "Drag out a space",
              body: "Drag on empty workspace to place your first vision exactly where you want it.",
-             anchor: CGPoint(x: 0.34, y: 0.68))
+             anchor: CGPoint(x: 0.31, y: 0.70))
     ]
 
     @Published var index = 0                 // 0 means the tour is not showing
@@ -7569,7 +7569,7 @@ private struct VisionTourOverlay: View {
                 let point = CGPoint(x: geo.size.width * beat.anchor.x,
                                     y: geo.size.height * beat.anchor.y)
                 ZStack(alignment: .topLeading) {
-                    Color.black.opacity(0.22)
+                    Color.black.opacity(0.14)
                         .ignoresSafeArea()
                         .onTapGesture { withAnimation(.easeInOut(duration: 0.3)) { tour.next() } }
 
@@ -7608,22 +7608,41 @@ private struct VisionTourOverlay: View {
                         }
                         .padding(.top, 3)
                     }
-                    .padding(14)
-                    .frame(width: 268, alignment: .leading)
+                    .padding(16)
+                    .frame(width: 284, alignment: .leading)
                     .background(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(Color(red: 0.09, green: 0.094, blue: 0.125).opacity(0.96))
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(.ultraThinMaterial)
+                            .environment(\.colorScheme, .dark)
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .strokeBorder(.white.opacity(0.12), lineWidth: 1)
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .strokeBorder(.white.opacity(0.16), lineWidth: 1)
                     )
-                    .shadow(color: .black.opacity(0.45), radius: 20, y: 8)
+                    .overlay(alignment: .top) {
+                        // the arrow that makes it clear what is being described
+                        UpArrow()
+                            .fill(.white.opacity(0.16))
+                            .frame(width: 16, height: 8)
+                            .offset(y: -8)
+                    }
+                    .shadow(color: .black.opacity(0.5), radius: 24, y: 10)
                     .position(x: max(170, min(geo.size.width - 170, point.x + 40)),
                               y: min(geo.size.height - 90, point.y + 96))
                 }
                 .transition(.opacity)
             }
+        }
+    }
+
+    private struct UpArrow: Shape {
+        func path(in r: CGRect) -> Path {
+            var p = Path()
+            p.move(to: CGPoint(x: r.midX, y: r.minY))
+            p.addLine(to: CGPoint(x: r.maxX, y: r.maxY))
+            p.addLine(to: CGPoint(x: r.minX, y: r.maxY))
+            p.closeSubpath()
+            return p
         }
     }
 
