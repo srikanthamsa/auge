@@ -30,6 +30,12 @@ final class OnboardingController {
         present(force: false, onFinish: onFinish)
     }
 
+    /// Hides the film itself so the live workspace can show through while the
+    /// practice key is held.
+    func setStageHidden(_ hidden: Bool) {
+        window?.alphaValue = hidden ? 0 : 1
+    }
+
     func present(force: Bool, onFinish: (() -> Void)? = nil) {
         if force { state = OnboardingState() }
         completion = onFinish
@@ -53,6 +59,8 @@ final class OnboardingController {
     }
 
     private func finish() {
+        window?.alphaValue = 1
+        NotificationCenter.default.post(name: .augePreview, object: false)
         OnboardingAudio.shared.stop()
         UserDefaults.standard.set(true, forKey: Self.doneKey)
         window?.orderOut(nil)
@@ -121,7 +129,7 @@ private final class OnboardingWindow: NSWindow {
 @MainActor
 final class OnboardingState: ObservableObject {
     enum Step: Int, CaseIterable {
-        case question, choice, answer, introducing, promise, practice, done
+        case question, tabsQuestion, habitQuestion, choice, answer, introducing, promise, practice, done
     }
     @Published var step: Step = .question
     @Published var shortcut = "Fn"
@@ -146,12 +154,15 @@ final class OnboardingState: ObservableObject {
             }
         }
     }
-    @Published var choice: Choice = .both
+    @Published var answerIndex = 2
+    static let symbols = ["macwindow.on.rectangle", "rectangle.on.rectangle", "square.stack.3d.up"]
 
     /// Seconds each scene holds before the film moves on.
     func duration(of step: Step) -> Double? {
         switch step {
         case .question: 4.6
+        case .tabsQuestion: 4.4
+        case .habitQuestion: 4.4
         case .answer: 4.6
         case .introducing: 4.8
         case .promise: 5.2
@@ -218,13 +229,20 @@ private struct OnboardingView: View {
             switch state.step {
             case .question:
                 SceneText(lines: ["How do you reach the things", "you check a hundred times a day?"], size: 40)
+            case .tabsQuestion:
+                ChoiceScene(prompt: "How many tabs are open right now?",
+                            options: ["A sensible few", "Too many to count", "Don't ask"],
+                            pick: { state.answerIndex = $0; advance() })
+            case .habitQuestion:
+                ChoiceScene(prompt: "And how often do you go looking?",
+                            options: ["Every few minutes", "Every hour or so", "All day, honestly"],
+                            pick: { state.answerIndex = $0; advance() })
             case .choice:
-                ChoiceScene(pick: { choice in
-                    state.choice = choice
-                    advance()
-                })
+                ChoiceScene(prompt: "Which one is you?",
+                            options: ["Windows", "Tabs", "Honestly, both"],
+                            pick: { state.answerIndex = $0; advance() })
             case .answer:
-                SceneText(lines: [state.choice == .both ? "So does everyone." : "Same here.",
+                SceneText(lines: [state.answerIndex == 2 ? "So does everyone." : "Same here.",
                                   "There is a faster way."], size: 42)
             case .introducing:
                 introduceScene
@@ -259,7 +277,7 @@ private struct OnboardingView: View {
                 .foregroundStyle(.white.opacity(0.5))
                 .textCase(.uppercase)
             Text("Auge.")
-                .font(.system(size: 104, weight: .bold))
+                .font(AppBrand.displayFont(112))
                 .tracking(3)
                 .foregroundStyle(.white)
             Text("See Beyond.")
@@ -340,9 +358,8 @@ private struct OnboardingView: View {
             SceneText(lines: ["You're all set."], size: 34)
             Text("Hold \(state.shortcut) anywhere to peek.")
                 .font(.system(size: 14)).foregroundStyle(.white.opacity(0.5))
-            Button("Start peeking") { onFinish() }
-                .buttonStyle(.borderedProminent)
-                .padding(.top, 8)
+            GlowButton(title: "See Beyond") { onFinish() }
+                .padding(.top, 14)
         }
         .onAppear { ui.cursorVisible = false }
     }
@@ -439,9 +456,20 @@ private struct OnboardingView: View {
     private func installKeyMonitor() {
         NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
             let mods = event.modifierFlags
-            if state.step == .practice, mods.contains(.function) {
-                state.pressing = true
-                advance()
+            if state.step == .practice {
+                let held = mods.contains(.function)
+                if held != state.pressing {
+                    state.pressing = held
+                    // Live preview: the real workspace opens while the key is down,
+                    // so the practice beat shows the thing it is describing.
+                    OnboardingController.shared.setStageHidden(held)
+                    NotificationCenter.default.post(name: .augePreview, object: held)
+                    if held {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+                            if state.step == .practice { advance() }
+                        }
+                    }
+                }
             }
             return event
         }
@@ -451,36 +479,38 @@ private struct OnboardingView: View {
 /// One beat where the person actually answers, so the film has a decision in it
 /// instead of seven straight reads.
 private struct ChoiceScene: View {
-    let pick: (OnboardingState.Choice) -> Void
+    let prompt: String
+    let options: [String]
+    let pick: (Int) -> Void
     @StateObject private var fade = FadeIn()
     @StateObject private var hover = ChoiceHover()
 
     var body: some View {
         VStack(spacing: 30) {
-            SceneText(lines: ["Which one is you?"], size: 38)
+            SceneText(lines: [prompt], size: 38)
             HStack(spacing: 16) {
-                ForEach(OnboardingState.Choice.allCases, id: \.self) { choice in
+                ForEach(Array(options.enumerated()), id: \.offset) { index, option in
                     Button {
-                        pick(choice)
+                        pick(index)
                     } label: {
                         VStack(spacing: 10) {
-                            Image(systemName: choice.symbol)
+                            Image(systemName: OnboardingState.symbols[index % OnboardingState.symbols.count])
                                 .font(.system(size: 26, weight: .light))
-                            Text(choice.title)
+                            Text(option)
                                 .font(.system(size: 15, weight: .semibold))
                         }
                         .frame(width: 168, height: 132)
-                        .foregroundStyle(.white.opacity(hover.hovered == choice ? 1 : 0.82))
+                        .foregroundStyle(.white.opacity(hover.hovered == index ? 1 : 0.82))
                         .background(RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .fill(.white.opacity(hover.hovered == choice ? 0.16 : 0.07)))
+                            .fill(.white.opacity(hover.hovered == index ? 0.16 : 0.07)))
                         .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .strokeBorder(.white.opacity(hover.hovered == choice ? 0.4 : 0.14), lineWidth: 1))
-                        .scaleEffect(hover.hovered == choice ? 1.03 : 1)
+                            .strokeBorder(.white.opacity(hover.hovered == index ? 0.4 : 0.14), lineWidth: 1))
+                        .scaleEffect(hover.hovered == index ? 1.03 : 1)
                         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: hover.hovered)
                     }
                     .buttonStyle(.plain)
                     .onHover { inside in
-                        hover.hovered = inside ? choice : (hover.hovered == choice ? nil : hover.hovered)
+                        hover.hovered = inside ? index : (hover.hovered == index ? nil : hover.hovered)
                     }
                     .opacity(fade.shown ? 1 : 0)
                     .offset(y: fade.shown ? 0 : 18)
@@ -495,7 +525,71 @@ private struct ChoiceScene: View {
 }
 
 private final class ChoiceHover: ObservableObject {
-    @Published var hovered: OnboardingState.Choice?
+    @Published var hovered: Int?
+}
+
+/// The finishing button: the Uiverse swirl, recoloured cyan, drawn natively —
+/// a soft radial plate with blurred blobs drifting inside it and an inset rim.
+private struct GlowButton: View {
+    let title: String
+    let action: () -> Void
+
+    private let inner = Color(red: 0.31, green: 0.85, blue: 1.0)
+    private let outer = Color(red: 0.66, green: 0.95, blue: 1.0)
+    private let blob1 = Color(red: 0.10, green: 0.78, blue: 1.0).opacity(0.7)
+    private let blob2 = Color(red: 0.10, green: 0.48, blue: 1.0)
+    private let blob3 = Color(red: 0.10, green: 0.88, blue: 0.86)
+    private let blob4 = Color(red: 0.55, green: 0.94, blue: 1.0).opacity(0.7)
+
+    var body: some View {
+        Button(action: action) {
+            TimelineView(.animation(minimumInterval: 1.0 / 30)) { context in
+                let t = context.date.timeIntervalSinceReferenceDate
+                ZStack {
+                    Circle().fill(blob1).frame(width: 40, height: 40)
+                        .blur(radius: 12)
+                        .offset(x: sin(t * 0.9) * 40, y: cos(t * 0.7) * 22)
+                    Circle().fill(blob2).frame(width: 40, height: 40)
+                        .blur(radius: 14)
+                        .offset(x: 48 + cos(t * 0.6) * 30, y: -14 + sin(t * 0.8) * 18)
+                    Circle().fill(blob3).frame(width: 40, height: 40)
+                        .blur(radius: 16)
+                        .offset(x: -10 + sin(t * 0.5) * 26, y: 8 + cos(t * 1.1) * 16)
+                    Circle().fill(blob4).frame(width: 40, height: 40)
+                        .blur(radius: 8)
+                        .offset(x: 60 + sin(t * 0.75) * 24, y: 6 + cos(t * 0.55) * 20)
+                }
+                .frame(width: 132, height: 46)
+                .clipped()
+            }
+            .frame(width: 132, height: 46)
+            .background(
+                RoundedRectangle(cornerRadius: 23, style: .continuous)
+                    .fill(RadialGradient(colors: [inner, outer],
+                                         center: .center, startRadius: 2, endRadius: 90))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 23, style: .continuous)
+                    .strokeBorder(.white.opacity(0.35), lineWidth: 1)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 23, style: .continuous)
+                    .fill(LinearGradient(colors: [.white.opacity(0.35), .clear, .white.opacity(0.18)],
+                                         startPoint: .top, endPoint: .bottom))
+                    .blendMode(.plusLighter)
+                    .allowsHitTesting(false)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 23, style: .continuous))
+            .shadow(color: Color(red: 0.34, green: 0.87, blue: 1).opacity(0.55), radius: 14)
+            .overlay(
+                Text(title)
+                    .font(.system(size: 15, weight: .semibold))
+                    .tracking(0.6)
+                    .foregroundStyle(.white)
+            )
+        }
+        .buttonStyle(.plain)
+    }
 }
 
 // MARK: - Pieces

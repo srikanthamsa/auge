@@ -11,6 +11,8 @@ import SwiftUI
 import WebKit
 
 extension Notification.Name {
+    /// Onboarding practice: show or hide the workspace without leaving the film.
+    static let augePreview = Notification.Name("AugePreview")
     static let seeEscape = Notification.Name("SeeEscapePressed")
     static let seePeekOpened = Notification.Name("SeePeekOpened")
     static let seePeekClosed = Notification.Name("SeePeekClosed")
@@ -40,6 +42,26 @@ enum AppBrand {
 
     static var icon: NSImage? {
         image("AugeMark") ?? image("AppIcon-1024") ?? NSImage(systemSymbolName: "eye", accessibilityDescription: "Auge")
+    }
+
+    /// Display face for the wordmark. Drop Courages.ttf (or .otf) into the app's
+    /// Resources and it is registered at launch and used automatically.
+    @MainActor
+    static func registerBundledFonts() {
+        guard let urls = Bundle.main.urls(forResourcesWithExtension: nil, subdirectory: nil) else { return }
+        for url in urls where ["ttf", "otf"].contains(url.pathExtension.lowercased()) {
+            CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+            debugLog("font registered \(url.lastPathComponent)")
+        }
+    }
+
+    @MainActor
+    static func displayFont(_ size: CGFloat, fallbackWeight: Font.Weight = .bold) -> Font {
+        let candidates = ["Courages", "Courages-Regular", "Courages Regular"]
+        for name in candidates where NSFont(name: name, size: size) != nil {
+            return .custom(name, size: size)
+        }
+        return .system(size: size, weight: fallbackWeight)
     }
 
     static var menuMark: NSImage? {
@@ -74,6 +96,8 @@ private final class AugeAppDelegate: NSObject, NSApplicationDelegate {
     // Keep a single status item alive for the app lifetime.
     private var statusItem: NSStatusItem?
     private var panel: SeeOverlayPanel?
+    private var previewVisible = false
+    private var statusMenuMonitor: Any?
     private var escapeMonitor: Any?
     private let model = OverlayModel()
 
@@ -97,27 +121,62 @@ private final class AugeAppDelegate: NSObject, NSApplicationDelegate {
             OnboardingController.shared.presentIfNeeded { [weak self] in self?.showPanel() }
             return
         }
+        AppBrand.registerBundledFonts()
         PasskeyBridge.shared.start()
+        observePreview()
+        installStatusMenuMonitor()
         AdBlocker.shared.prepare()
         showPanel()
     }
 
+    /// The status button's action only fires for left clicks on some builds, so
+    /// right clicks are caught by a local monitor scoped to the button's window.
+    private func installStatusMenuMonitor() {
+        statusMenuMonitor = NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDown]) { [weak self] event in
+            guard let self, let button = self.statusItem?.button,
+                  let window = button.window, event.window === window else { return event }
+            self.showStatusMenu()
+            return nil
+        }
+    }
+
+    private func showStatusMenu() {
+        guard let button = statusItem?.button else { return }
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Play Introduction…", action: #selector(showIntroduction), keyEquivalent: "")
+        menu.addItem(withTitle: "Show Workspace", action: #selector(togglePanel), keyEquivalent: "")
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "About Auge", action: #selector(showAbout), keyEquivalent: "")
+        menu.addItem(withTitle: "Quit Auge", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        for item in menu.items { item.target = self }
+        NSApp.activate(ignoringOtherApps: true)
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 6), in: button)
+    }
+
+    private func observePreview() {
+        NotificationCenter.default.addObserver(forName: .augePreview, object: nil, queue: .main) { [weak self] note in
+            guard let self, let show = note.object as? Bool else { return }
+            Task { @MainActor in
+                if show { self.showPreview() } else { self.hidePreview() }
+            }
+        }
+    }
+
+    private func showPreview() {
+        previewVisible = true
+        showPanel()
+    }
+
+    private func hidePreview() {
+        guard previewVisible else { return }
+        previewVisible = false
+        hidePanel()
+    }
+
     @objc private func statusItemClicked() {
         guard let button = statusItem?.button else { return }
-        if NSApp.currentEvent?.type == .rightMouseUp || NSApp.currentEvent?.modifierFlags.contains(.control) == true {
-            let menu = NSMenu()
-            menu.addItem(withTitle: "Play Introduction…", action: #selector(showIntroduction), keyEquivalent: "")
-            menu.addItem(withTitle: "Show Workspace", action: #selector(togglePanel), keyEquivalent: "")
-            menu.addItem(.separator())
-            menu.addItem(withTitle: "About Auge", action: #selector(showAbout), keyEquivalent: "")
-            menu.addItem(withTitle: "Quit Auge", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-            for item in menu.items { item.target = self }
-            // popUp, not performClick: giving the item a menu would swallow the
-            // next left click.
-            NSApp.activate(ignoringOtherApps: true)
-            menu.popUp(positioning: nil,
-                       at: NSPoint(x: 0, y: button.bounds.height + 6),
-                       in: button)
+        if NSApp.currentEvent?.modifierFlags.contains(.control) == true {
+            showStatusMenu()
             return
         }
         togglePanel()
