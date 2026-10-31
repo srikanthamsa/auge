@@ -2868,6 +2868,19 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
 
     /// Push the current configuration into the live web view.
     /// Single path for restoring a zapped element: model, page, persistence.
+    /// The picker already hid the element in the page; this makes it real by
+    /// storing the selector, so it survives a reload and shows in the panel.
+    func addHidden(_ selector: String) {
+        guard !selector.isEmpty else { return }
+        if !config.hiddenSelectors.contains(selector) {
+            config.hiddenSelectors.append(selector)
+        }
+        debugLog("zap stored \(selector) total=\(config.hiddenSelectors.count)")
+        applyHiddenSelectors()
+        applyTuning(reload: false)
+        setPicking(false)
+    }
+
     func removeHidden(_ selector: String) {
         config.hiddenSelectors.removeAll { $0 == selector }
         MenuHover.shared.clear("uh:" + selector)
@@ -4499,7 +4512,7 @@ private struct SeeOverlay: View {
                                       isFocused: model.focusedID == site.id,
                                       onFocus: { model.focusedID = site.id },
                                       onClose: { model.remove(site) },
-                                      onPick: { _ in })
+                                      onPick: { selector in site.addHidden(selector) })
                         .scaleEffect(appeared ? 1 : 0.97)
                         .opacity(surfaceOpacity(appeared ? 1 : 0, for: site))
                         .animation(.spring(response: 0.26, dampingFraction: 0.74)
