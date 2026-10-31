@@ -32,6 +32,9 @@ final class OnboardingController {
 
     /// Hides the film itself so the live workspace can show through while the
     /// practice key is held.
+    /// True while the film is the thing on screen.
+    var isOnScreen: Bool { window?.isVisible == true }
+
     func setStageHidden(_ hidden: Bool) {
         window?.alphaValue = hidden ? 0 : 1
     }
@@ -609,6 +612,8 @@ private struct BloomMark: View {
                 }
             }
             .frame(width: 260, height: 130)
+            .shadow(color: .white.opacity(0.95), radius: 26)
+            .shadow(color: .white.opacity(0.7), radius: 54)
             .opacity(shown)
             .scaleEffect(0.92 + shown * 0.08)
         }
@@ -646,7 +651,7 @@ private struct ChoiceScene: View {
                         Text(option)
                             .font(.system(size: 15, weight: .semibold))
                     }
-                    .frame(width: 168, height: 132)
+                    .frame(width: 172, height: 92)
                     .foregroundStyle(.white.opacity(hover.hovered == index ? 1 : 0.82))
                     .background(RoundedRectangle(cornerRadius: 18, style: .continuous)
                         .fill(.white.opacity(hover.hovered == index ? 0.16 : 0.07)))

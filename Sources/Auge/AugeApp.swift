@@ -84,7 +84,7 @@ enum AppBrand {
         if let cached = eyeMarkCache { return cached }
         guard let url = Bundle.main.url(forResource: "AugeEye", withExtension: "png"),
               let src = NSImage(contentsOf: url) else { return nil }
-        let height: CGFloat = 15
+        let height: CGFloat = 16
         let width = height * (src.size.width / max(src.size.height, 1))
         let img = NSImage(size: NSSize(width: width, height: height))
         img.lockFocus()
@@ -92,7 +92,7 @@ enum AppBrand {
         src.draw(in: NSRect(x: 0, y: 0, width: width, height: height),
                  from: .zero, operation: .sourceOver, fraction: 1)
         img.unlockFocus()
-        img.isTemplate = true          // tinted by the menu bar, like Peek's
+        img.isTemplate = false         // keep the colour the mark was drawn in
         eyeMarkCache = img
         return img
     }
@@ -374,6 +374,10 @@ private final class AugeAppDelegate: NSObject, NSApplicationDelegate {
         guard down != fnHeld else { return }
         fnHeld = down
         FnState.held = down
+
+        // The introduction owns Fn while it is on screen: the practice beat is
+        // using it for the bloom, and the workspace must not open over it.
+        if OnboardingController.shared.isOnScreen { return }
 
         if down {
             openedByFn = true
