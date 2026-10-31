@@ -371,6 +371,7 @@ private final class AugeAppDelegate: NSObject, NSApplicationDelegate {
             NSApp.activate(ignoringOtherApps: true)
             panel?.makeKey()
         }
+        if OnboardingController.shared.hasCompleted { VisionTour.shared.startIfNeeded() }
         NotificationCenter.default.post(name: .seePeekOpened, object: nil)
         if previousApp == nil { previousApp = NSWorkspace.shared.frontmostApplication }
         NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
@@ -477,7 +478,7 @@ private final class AugeAppDelegate: NSObject, NSApplicationDelegate {
         panel.acceptsMouseMovedEvents = true
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
-        panel.contentView = FirstMouseHostingView(rootView: SeeOverlay(onClose: { [weak self] in self?.hidePanel() }, model: model))
+        panel.contentView = FirstMouseHostingView(rootView: SeeOverlay(onClose: { [weak self] in self?.hidePanel() }, model: model).overlay { VisionTourOverlay() })
         return panel
     }
 
@@ -1369,7 +1370,7 @@ private enum NativeWidgetKind: String, CaseIterable, Identifiable {
 }
 
 private enum WidgetPickerCategory: String, CaseIterable, Identifiable {
-    case websites = "Websites", widgets = "Widgets"
+    case websites = "Websites", widgets = "Visions"
     var id: String { rawValue }
 }
 
@@ -6540,7 +6541,7 @@ private struct WorkspaceContextMenu: View {
 
     var body: some View {
         VStack(spacing: 1) {
-            menuRow("Add New Widgets…", symbol: "rectangle.stack.badge.plus", action: onAdd)
+            menuRow("Add New Visions…", symbol: "rectangle.stack.badge.plus", action: onAdd)
             sep
             menuRow("Tidy Layout", symbol: "sparkles", action: onTidy)
             sep
@@ -6548,7 +6549,7 @@ private struct WorkspaceContextMenu: View {
             sep
             menuRow("Open Settings…", symbol: "gearshape", action: onSettings)
             sep
-            menuRow("Remove All Widgets…", symbol: "trash", action: onRemoveAll, destructive: true)
+            menuRow("Remove All Visions…", symbol: "trash", action: onRemoveAll, destructive: true)
         }
         .padding(6).frame(width: 256)
         .background(GlassMenuBackground())
@@ -6690,7 +6691,7 @@ private struct WidgetPickerOverlay: View {
                 // Search field
                 HStack(spacing: 12) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.white.opacity(0.62))
-                    TextField("Enter the website, widget, or app you want to see…", text: $search)
+                    TextField("Enter the website, vision, or app you want to see…", text: $search)
                         .textFieldStyle(.plain).font(.system(size: 15, weight: .medium)).onSubmit(submitSearch)
                         .focused($searchFocused)
                         .onChange(of: search) { _, _ in selection.index = 0 }
@@ -6987,7 +6988,7 @@ private struct SurfaceContextMenu: View {
                 row(sizeLocked ? "Unlock Size" : "Lock Size",
                     sizeLocked ? "lock.open" : "lock", onToggleLock)
                 sep
-                row("Remove Widget", "trash", onRemove, destructive: true)
+                row("Remove Vision", "trash", onRemove, destructive: true)
             }
         }
         .padding(6).frame(width: 232)
@@ -7505,5 +7506,140 @@ private struct ChromeOverlay: View {
     private func menuCenter(for point: CGPoint, size: CGSize, menu: CGSize) -> CGPoint {
         let o = menuOrigin(for: point, size: size, menu: menu)
         return CGPoint(x: o.x + menu.width / 2, y: o.y + menu.height / 2)
+    }
+}
+
+
+// MARK: - First-use coaching
+
+/// Four beats that teach the gestures once, on the first real visit: pin, add,
+/// right click, and drag out empty space to make the first vision.
+@MainActor
+final class VisionTour: ObservableObject {
+    static let shared = VisionTour()
+
+    struct Beat {
+        let title: String
+        let body: String
+        let anchor: CGPoint          // unit coordinates in the panel
+    }
+
+    let beats: [Beat] = [
+        Beat(title: "Pin what matters",
+             body: "Pin keeps a site or vision resting on the workspace when you let go.",
+             anchor: CGPoint(x: 0.52, y: 0.10)),
+        Beat(title: "Add anything",
+             body: "Add brings in a website, a file, or one of the built-in visions.",
+             anchor: CGPoint(x: 0.60, y: 0.10)),
+        Beat(title: "Right click a vision",
+             body: "Right clicking opens what that vision can do: refresh, resize, remove.",
+             anchor: CGPoint(x: 0.50, y: 0.46)),
+        Beat(title: "Drag out a space",
+             body: "Drag on empty workspace to place your first vision exactly where you want it.",
+             anchor: CGPoint(x: 0.34, y: 0.68))
+    ]
+
+    @Published var index = 0                 // 0 means the tour is not showing
+    private let key = "auge.tour.done"
+
+    var hasFinished: Bool { UserDefaults.standard.bool(forKey: key) }
+
+    func startIfNeeded() {
+        guard !hasFinished, index == 0 else { return }
+        index = 1
+    }
+
+    func next() {
+        if index >= beats.count { finish() } else { index += 1 }
+    }
+
+    func finish() {
+        index = 0
+        UserDefaults.standard.set(true, forKey: key)
+    }
+}
+
+private struct VisionTourOverlay: View {
+    @StateObject private var tour = VisionTour.shared
+
+    var body: some View {
+        GeometryReader { geo in
+            if tour.index > 0, tour.index <= tour.beats.count {
+                let beat = tour.beats[tour.index - 1]
+                let point = CGPoint(x: geo.size.width * beat.anchor.x,
+                                    y: geo.size.height * beat.anchor.y)
+                ZStack(alignment: .topLeading) {
+                    Color.black.opacity(0.22)
+                        .ignoresSafeArea()
+                        .onTapGesture { withAnimation(.easeInOut(duration: 0.3)) { tour.next() } }
+
+                    // the pointer, bobbing on the thing it is describing
+                    Image(systemName: "cursorarrow")
+                        .font(.system(size: 22, weight: .regular))
+                        .foregroundStyle(.white)
+                        .shadow(color: .black.opacity(0.6), radius: 4, y: 1)
+                        .position(point)
+                        .allowsHitTesting(false)
+                        .modifier(Bob())
+
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text(beat.title)
+                            .font(AppBrand.uiFont(14, weight: .semibold))
+                            .foregroundStyle(.white)
+                        Text(beat.body)
+                            .font(AppBrand.uiFont(12.5))
+                            .foregroundStyle(.white.opacity(0.62))
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack(spacing: 10) {
+                            Text("\(tour.index) of \(tour.beats.count)")
+                                .font(AppBrand.uiFont(10.5))
+                                .foregroundStyle(.white.opacity(0.32))
+                            Spacer()
+                            Button("Skip") { tour.finish() }
+                                .buttonStyle(.plain)
+                                .font(AppBrand.uiFont(11.5))
+                                .foregroundStyle(.white.opacity(0.45))
+                            Button(tour.index == tour.beats.count ? "Done" : "Next") {
+                                withAnimation(.easeInOut(duration: 0.3)) { tour.next() }
+                            }
+                            .buttonStyle(.plain)
+                            .font(AppBrand.uiFont(11.5, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.9))
+                        }
+                        .padding(.top, 3)
+                    }
+                    .padding(14)
+                    .frame(width: 268, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(Color(red: 0.09, green: 0.094, blue: 0.125).opacity(0.96))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .strokeBorder(.white.opacity(0.12), lineWidth: 1)
+                    )
+                    .shadow(color: .black.opacity(0.45), radius: 20, y: 8)
+                    .position(x: max(170, min(geo.size.width - 170, point.x + 40)),
+                              y: min(geo.size.height - 90, point.y + 96))
+                }
+                .transition(.opacity)
+            }
+        }
+    }
+
+    private struct Bob: ViewModifier {
+        @StateObject private var s = BobState()
+        func body(content: Content) -> some View {
+            content.offset(y: s.up ? -3 : 3)
+                .onAppear {
+                    withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
+                        s.up = true
+                    }
+                }
+        }
+    }
+
+    private final class BobState: ObservableObject {
+        @Published var up = false
     }
 }
