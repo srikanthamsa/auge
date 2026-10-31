@@ -7535,16 +7535,17 @@ final class VisionTour: ObservableObject {
     }
 
     let beats: [Beat] = [
-        Beat(target: "tb:pin",
-             title: "Want to keep Auge around?",
-             body: "While holding Fn, click the pin at the top. Release Fn and the workspace stays open. Esc or × dismisses it when you're done."),
-        Beat(target: "tb:add",
-             title: "Bring the web within reach.",
-             body: "Click Add to bring in a webpage — or drag one straight into any empty space. Watch."),
         Beat(target: nil,
-             title: "That's Auge.",
-             body: "Hold Fn whenever you need another look.")
+             title: "A little peek. Whenever you need.",
+             body: "Hold Fn to bring up your workspace. Release it to let it go. Peek in whenever you need something, then get straight back to what you were doing."),
+        Beat(target: "tb:pin",
+             title: "Give your Fn key a rest.",
+             body: "Want to stay longer? Hold Fn and click the pin. Release Fn and the workspace stays put. Esc or × when you're done."),
+        Beat(target: "tb:add",
+             title: "Bring anything into your workspace.",
+             body: "Click Add, or draw an area anywhere on screen to create a vision exactly where you want it.")
     ]
+
 
 
     @Published var index = 0
@@ -7652,7 +7653,7 @@ private struct Callout: View {
             Text(beat.title)
                 .font(AppBrand.uiFont(14, weight: .semibold))
                 .foregroundStyle(.white)
-            if beat.target == "tb:add" {
+            if beat.title.hasPrefix("Bring anything") {
                 DragDemo()
                     .padding(.vertical, 4)
             }
