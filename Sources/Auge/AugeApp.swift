@@ -2708,10 +2708,7 @@ private final class SeeWebBridge: NSObject, WKScriptMessageHandler {
         case "seeZap":
             if let body = message.body as? [String: Any],
                let items = body["items"] as? [[String: Any]] {
-                debugLog("seeZap items=\(items.count) site=\(site?.title ?? "-")")
                 site?.updateZapped(items)
-            } else {
-                debugLog("seeZap malformed body=\(String(describing: message.body))")
             }
         default:
             break
@@ -2868,59 +2865,7 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
 
     /// Push the current configuration into the live web view.
     /// Single path for restoring a zapped element: model, page, persistence.
-    /// The picker already hid the element in the page; this makes it real by
-    /// storing the selector, so it survives a reload and shows in the panel.
-    func addHidden(_ selector: String) {
-        guard !selector.isEmpty else { return }
-        if !config.hiddenSelectors.contains(selector) {
-            config.hiddenSelectors.append(selector)
-        }
-        debugLog("zap stored \(selector) total=\(config.hiddenSelectors.count)")
-        applyHiddenSelectors()
-        applyTuning(reload: false)
-        setPicking(false)
-    }
-
-    /// Clears every record of a zap, in the site config and in the page's own
-    /// registry, then reloads. A guaranteed way back to a clean page.
-    func restoreAllZapped() {
-        config.hiddenSelectors.removeAll()
-        webView?.evaluateJavaScript("""
-        (function(){
-          try {
-            localStorage.removeItem('zapped_elements_registry');
-            if (window.__seeZapper && window.__seeZapper.reapply) { window.__seeZapper.reapply(); }
-            document.querySelectorAll('.zapper-target-hover').forEach(function(n){ n.classList.remove('zapper-target-hover'); });
-            return 'cleared';
-          } catch (e) { return 'error:' + e; }
-        })();
-        """) { value, _ in
-            debugLog("restore all -> \(String(describing: value))")
-        }
-        zapped = []
-        applyHiddenSelectors()
-        applyTuning(reload: true)
-        debugLog("restoreAllZapped done")
-    }
-
     func removeHidden(_ selector: String) {
-        // A zap hides the element inline as well as through CSS, so clearing the
-        // stored selector alone left it invisible until a reload.
-        if let data = try? JSONEncoder().encode(selector),
-           let json = String(data: data, encoding: .utf8) {
-            webView?.evaluateJavaScript("""
-            (function(){
-              try {
-                document.querySelectorAll(\(json)).forEach(function(el){
-                  el.style.removeProperty('display');
-                });
-                return 'shown';
-              } catch (e) { return 'error:' + e; }
-            })();
-            """) { value, _ in
-                debugLog("unzap \(selector) -> \(String(describing: value))")
-            }
-        }
         config.hiddenSelectors.removeAll { $0 == selector }
         MenuHover.shared.clear("uh:" + selector)
         debugLog("unhide \(selector) remaining=\(config.hiddenSelectors.count)")
@@ -2963,11 +2908,8 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         // so it has to exist before the document paints.
         controller.addUserScript(WKUserScript(source: PageScripts.authWatcher,
                                               injectionTime: .atDocumentEnd, forMainFrameOnly: true))
-        // Document start is unreliable on heavy SPAs (x.com, YouTube): the script
-        // never took, so the zapped list never reached the panel. End of document
-        // still runs before first paint matters and always lands.
         controller.addUserScript(WKUserScript(source: PageScripts.zapper,
-                                              injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+                                              injectionTime: .atDocumentStart, forMainFrameOnly: true))
         controller.addUserScript(WKUserScript(source: PageScripts.hideWebViewBridge,
                                               injectionTime: .atDocumentStart, forMainFrameOnly: false))
         if config.darkMode {
@@ -2999,29 +2941,6 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
 
     func applyHiddenSelectors() {
         guard let webView else { return }
-        // Ask the page what it has zapped. Relying on the page's own load-time
-        // notify alone left the panel empty whenever that script never ran.
-        webView.evaluateJavaScript("""
-        (function(){
-          try {
-            if (window.__seeZapper && window.__seeZapper.refresh) { window.__seeZapper.refresh(); return 'refreshed'; }
-            return 'no-zapper';
-          } catch (e) { return 'error:' + e; }
-        })();
-        """) { value, _ in
-            let probe = (value as? String) ?? "nil"
-            debugLog("zapper probe -> \(probe)")
-            if probe == "no-zapper" {
-                // The document-start injection did not survive on this page, so
-                // install it now rather than leaving the panel permanently empty.
-                webView.evaluateJavaScript(PageScripts.zapper) { _, error in
-                    debugLog("zapper reinstall error=\(String(describing: error))")
-                    webView.evaluateJavaScript("window.__seeZapper && window.__seeZapper.refresh(); 'ok'") { v, _ in
-                        debugLog("zapper reinstall -> \(String(describing: v))")
-                    }
-                }
-            }
-        }
         // An empty list clears the stylesheet, which is how an "unzap" becomes
         // visible immediately instead of after a reload.
         webView.evaluateJavaScript(PageScripts.hideCSS(config.hiddenSelectors), completionHandler: nil)
@@ -3056,33 +2975,13 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     }
 
     func setPicking(_ picking: Bool) {
-        debugLog("setPicking(entry) \(picking) was=\(isPickingElements)")
         isPickingElements = picking
         guard let webView else { return }
         if picking {
             exitChromeMode()
-            // The picker script is only injected at load time, so entering pick
-            // mode on a page that is already loaded did nothing at all. Install it
-            // now when it is missing, then enable whichever engine is present.
-            let js = """
-            (function(){
-              try {
-                if (!window.__seePickerClick) { \(PageScripts.picker) }
-                if (window.__seeZapper && window.__seeZapper.enable) { window.__seeZapper.enable(); return 'zapper'; }
-                return window.__seePickerClick ? 'picker' : 'none';
-              } catch (e) { return 'error:' + e; }
-            })();
-            """
-            webView.evaluateJavaScript(js) { value, error in
-                debugLog("pick start -> \(String(describing: value)) err=\(String(describing: error))")
-            }
+            webView.evaluateJavaScript("window.__seeZapper && window.__seeZapper.enable();", completionHandler: nil)
         } else {
-            // Ask the page for its list as the picking session ends: the page's
-            // own post on each zap is not reliable, and this is the moment the
-            // panel is about to show what was removed.
-            webView.evaluateJavaScript("window.__seeZapper && window.__seeZapper.disable(); window.__seeZapper && window.__seeZapper.refresh(); 'asked'") { value, error in
-                debugLog("zap pull -> \(String(describing: value)) err=\(String(describing: error))")
-            }
+            webView.evaluateJavaScript("window.__seeZapper && window.__seeZapper.disable();", completionHandler: nil)
             refreshChromeSnapshot()
         }
         webHost?.refreshHandles()
@@ -3172,53 +3071,7 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     func zap(at point: CGPoint) {
         let x = Int(point.x.rounded()), y = Int(point.y.rounded())
         guard x >= 0, y >= 0, x <= Int(size.width), y <= Int(size.height) else { return }
-        // Swift owns this now. Delegating to the page's own zapper meant the zap
-        // lived in page storage and only reached the panel if that page script
-        // posted back, which it did not — so elements vanished with no record.
-        let js = """
-        (function(){
-          try {
-            var el = document.elementFromPoint(\(x), \(y));
-            if (!el || el === document.body || el === document.documentElement) { return 'none'; }
-            function part(node) {
-              var base = node.nodeName.toLowerCase();
-              if (node.id) { return base + '#' + node.id; }
-              var cls = (node.classList && node.classList.length) ? '.' + Array.prototype.slice.call(node.classList).slice(0,2).join('.') : '';
-              var parent = node.parentNode;
-              if (!parent) { return base + cls; }
-              var index = 1;
-              for (var sib = node.previousElementSibling; sib; sib = sib.previousElementSibling) {
-                if (sib.nodeName === node.nodeName) { index++; }
-              }
-              return base + cls + ':nth-of-type(' + index + ')';
-            }
-            var parts = [], node = el;
-            for (var i = 0; i < 4 && node && node.nodeName !== 'BODY'; i++) {
-              parts.unshift(part(node));
-              node = node.parentElement;
-            }
-            var selector = parts.join(' > ');
-            el.style.setProperty('display', 'none', 'important');
-            return selector;
-          } catch (e) { return 'error:' + e; }
-        })();
-        """
-        webView?.evaluateJavaScript(js) { [weak self] value, error in
-            guard let self else { return }
-            guard let selector = value as? String, error == nil,
-                  selector != "none", !selector.hasPrefix("error:") else {
-                debugLog("zap failed value=\(String(describing: value)) err=\(String(describing: error))")
-                self.setPicking(false)
-                return
-            }
-            if !self.config.hiddenSelectors.contains(selector) {
-                self.config.hiddenSelectors.append(selector)
-            }
-            debugLog("zap stored \(selector) total=\(self.config.hiddenSelectors.count)")
-            self.setPicking(false)          // one zap, one pick session
-            self.applyHiddenSelectors()
-            self.applyTuning(reload: false)
-        }
+        webView?.evaluateJavaScript("window.__seeZapper && window.__seeZapper.zapAt(\(x), \(y));", completionHandler: nil)
     }
 
     /// A third-party sign-in button was pressed. Record it so the surface can
@@ -3331,12 +3184,9 @@ private struct WebsiteView: NSViewRepresentable {
         host.onClose = onClose
         host.onPick = onPick
         site.webView = host.webView
-        // A recreated host has a fresh, blank web view. The request id is the same,
-        // so this used to skip the load and leave the surface on about:blank.
         let blank = host.webView.url == nil
         guard context.coordinator.lastRequestID != site.requestID || blank else { return }
         context.coordinator.lastRequestID = site.requestID
-        if blank { debugLog("site \(site.title) was blank, loading \(site.requestedURL.absoluteString)") }
         site.load(into: host.webView)
     }
 
@@ -4570,7 +4420,7 @@ private struct SeeOverlay: View {
                                       isFocused: model.focusedID == site.id,
                                       onFocus: { model.focusedID = site.id },
                                       onClose: { model.remove(site) },
-                                      onPick: { selector in site.addHidden(selector) })
+                                      onPick: { _ in })
                         .scaleEffect(appeared ? 1 : 0.97)
                         .opacity(surfaceOpacity(appeared ? 1 : 0, for: site))
                         .animation(.spring(response: 0.26, dampingFraction: 0.74)
@@ -7323,6 +7173,20 @@ private struct ConfigureWidgetOverlay: View {
                                 .padding(.horizontal, 11).padding(.vertical, 5.5)
                                 .background(.white.opacity(0.12), in: Capsule())
                                 .overlay(Capsule().strokeBorder(.white.opacity(0.08), lineWidth: 0.5))
+                                .background {
+                                    GeometryReader { proxy in
+                                        Color.clear
+                                            .onAppear {
+                                                MenuHover.shared.setAction("zp:" + site.id.uuidString) {
+                                                    site.setPicking(!site.isPickingElements)
+                                                }
+                                                MenuHover.shared.register("zp:" + site.id.uuidString, proxy.frame(in: .global))
+                                            }
+                                            .onChange(of: proxy.frame(in: .global)) { _, new in
+                                                MenuHover.shared.register("zp:" + site.id.uuidString, new)
+                                            }
+                                    }
+                                }
                             }.buttonStyle(.plain)
                         }
 
@@ -7331,55 +7195,6 @@ private struct ConfigureWidgetOverlay: View {
                              : "Remove parts of the page you never use.")
                             .font(.system(size: 11))
                             .foregroundStyle(dim)
-
-                        if let wv = site.webView {
-                            Color.clear.frame(height: 0)
-                                .onAppear {
-                                    wv.evaluateJavaScript("window.__seeZapper && window.__seeZapper.refresh(); 'ok'") { _, _ in }
-                                }
-                        }
-
-                        // CSS zaps applied by the picker live in the site config,
-                        // not in the page registry, so they are listed here too.
-                        ForEach(site.config.hiddenSelectors, id: \.self) { selector in
-                            HStack(spacing: 8) {
-                                Circle().fill(Color(red: 0.36, green: 0.62, blue: 1.0).opacity(0.85))
-                                    .frame(width: 5, height: 5)
-                                Text(selector)
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundStyle(.white.opacity(0.8))
-                                    .lineLimit(1).truncationMode(.middle)
-                                Spacer(minLength: 4)
-                                Button { site.removeHidden(selector) } label: {
-                                    Image(systemName: "xmark")
-                                        .font(.system(size: 8.5, weight: .bold))
-                                        .foregroundStyle(.white.opacity(0.55))
-                                        .frame(width: 18, height: 18)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                        }
-
-                        HStack {
-                            Spacer()
-                            Button("Restore all") { site.restoreAllZapped() }
-                                .buttonStyle(.plain)
-                                .font(.system(size: 10.5, weight: .medium))
-                                .foregroundStyle(.white.opacity(0.5))
-                                .padding(.top, 6)
-                        }
-
-                        if site.zapped.isEmpty && site.config.hiddenSelectors.isEmpty {
-                            HStack(spacing: 6) {
-                                Text("Nothing zapped yet — hit Zap, then click the part of the page you never use.")
-                                    .font(.system(size: 10.5))
-                                    .foregroundStyle(dim.opacity(0.8))
-                                Spacer(minLength: 0)
-                            }
-                            .padding(.top, 2)
-                        }
 
                         if !site.zapped.isEmpty {
                             VStack(spacing: 0) {
