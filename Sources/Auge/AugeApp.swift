@@ -85,26 +85,43 @@ enum AppBrand {
         if let cached = eyeMarkCache { return cached }
         guard let url = Bundle.main.url(forResource: "AugeEyeBar", withExtension: "png"),
               let src = NSImage(contentsOf: url) else { return nil }
-        // Dark art on a dark bar disappears, so it sits on a soft chip and is
-        // lifted a little on the way in.
-        let height: CGFloat = 19
+        // The art is used as drawn. Only saturation is lifted so the pale rim
+        // separates from a light menu bar, and a soft dark shadow is dropped to
+        // give the shape an edge against anything behind it.
+        let height: CGFloat = 18
         let width = height * (src.size.width / max(src.size.height, 1))
         let img = NSImage(size: NSSize(width: width, height: height))
         img.lockFocus()
         NSGraphicsContext.current?.imageInterpolation = .high
-        let chip = NSRect(x: 0, y: 0, width: width, height: height)
-        NSColor(calibratedWhite: 1, alpha: 0.98).setFill()
-        NSBezierPath(roundedRect: chip, xRadius: height * 0.32, yRadius: height * 0.32).fill()
-        let art = Self.brightened(src) ?? src
-        art.draw(in: chip.insetBy(dx: 1.3, dy: 1.3),
-                 from: .zero, operation: .sourceOver, fraction: 1)
+        let box = NSRect(x: 0, y: 0, width: width, height: height)
+        let art = Self.saturated(src) ?? src
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.45)
+        shadow.shadowBlurRadius = 3.0
+        shadow.shadowOffset = NSSize(width: 0, height: -0.5)
+        shadow.set()
+        art.draw(in: box, from: .zero, operation: .sourceOver, fraction: 1)
         img.unlockFocus()
         img.isTemplate = false
         eyeMarkCache = img
         return img
     }
 
-    private static func brightened(_ image: NSImage) -> NSImage? {
+    private static func saturated(_ image: NSImage) -> NSImage? {
+        guard let tiff = image.tiffRepresentation,
+              let ci = CIImage(data: tiff) else { return nil }
+        let f = CIFilter(name: "CIColorControls")
+        f?.setValue(ci, forKey: kCIInputImageKey)
+        f?.setValue(0.0, forKey: kCIInputBrightnessKey)
+        f?.setValue(1.7, forKey: kCIInputSaturationKey)
+        f?.setValue(1.06, forKey: kCIInputContrastKey)
+        guard let out = f?.outputImage else { return nil }
+        let ctx = CIContext()
+        guard let cg = ctx.createCGImage(out, from: out.extent) else { return nil }
+        return NSImage(cgImage: cg, size: image.size)
+    }
+
+        private static func brightened(_ image: NSImage) -> NSImage? {
         guard let tiff = image.tiffRepresentation,
               let ci = CIImage(data: tiff) else { return nil }
         let f = CIFilter(name: "CIColorControls")
