@@ -158,6 +158,7 @@ final class OnboardingState: ObservableObject {
     @Published var tabAnswer = 2
     @Published var habitAnswer = 2
     @Published var holdStart: Date?
+    @Published var keyOrigin: CGPoint?
 
     /// What the film says back, using the answer the person actually gave.
     var reply: String {
@@ -213,14 +214,15 @@ private struct OnboardingView: View {
                 backdrop(geo)
                 scene(geo)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                if let start = state.holdStart {
-                    Bloom(start: start)
+                if let start = state.holdStart, let origin = state.keyOrigin {
+                    Bloom(start: start, origin: origin, stage: geo.size)
                         .allowsHitTesting(false)
                 }
                 cursorLayer(geo)
                 chrome
             }
             .frame(width: geo.size.width, height: geo.size.height)
+            .coordinateSpace(name: "stage")
         }
         .ignoresSafeArea()
         .onAppear {
@@ -331,6 +333,11 @@ private struct OnboardingView: View {
                     .font(.system(size: 30, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.92))
             }
+            .background(GeometryReader { g in
+                Color.clear
+                    .onAppear { publish(keyFrame: g.frame(in: .named("stage"))) }
+                    .onChange(of: g.frame(in: .named("stage"))) { _, f in publish(keyFrame: f) }
+            })
             .opacity(state.holdStart == nil ? 1 : 0.25)
             SceneText(lines: ["Press and hold \(state.shortcut)"], size: 40)
             Text("Hold it, and keep holding.")
@@ -475,6 +482,15 @@ private struct OnboardingView: View {
         }
     }
 
+    /// Remembers where the shortcut key is drawn, so the hold effect can start
+    /// from exactly there.
+    private func publish(keyFrame f: CGRect) {
+        let p = CGPoint(x: f.midX, y: f.midY)
+        if state.keyOrigin == nil || hypot((state.keyOrigin?.x ?? 0) - p.x, (state.keyOrigin?.y ?? 0) - p.y) > 1 {
+            state.keyOrigin = p
+        }
+    }
+
     private func advance() {
         debugLog("[onb] advance from \(state.step) \(Thread.callStackSymbols.dropFirst().prefix(3).joined(separator: " | "))")
         guard let next = OnboardingState.Step(rawValue: state.step.rawValue + 1) else {
@@ -515,41 +531,39 @@ private struct OnboardingView: View {
 /// clock, so it is as slow as the person holds.
 private struct Bloom: View {
     let start: Date
-    /// Where on the screen it begins: the Fn key itself, not the middle.
-    var origin = CGPoint(x: 0.5, y: 0.58)
+    /// The key's centre, in stage points — the stain begins behind the key
+    /// itself, not at the middle of the screen.
+    let origin: CGPoint
+    let stage: CGSize
+
+    private let green = Color(red: 0.16, green: 0.92, blue: 0.46)
+    private let deep = Color(red: 0.03, green: 0.55, blue: 0.30)
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 60)) { context in
             let t = context.date.timeIntervalSince(start)
-            // Creep, not bloom: a slow square-root front, so the first seconds
-            // are a stain spreading and the last seconds are the screen filling.
-            let reach = 0.045 + sqrt(t) * 0.16
-            GeometryReader { geo in
-                let w = geo.size.width, h = geo.size.height
-                let cx = w * origin.x, cy = h * origin.y
-                let unit = min(w, h)
-                ZStack {
-                    // Ten lobes, each on its own clock and its own bias, so the
-                    // edge never resolves into a circle.
-                    ForEach(0..<10, id: \.self) { i in
-                        let phase = Double(i) * 2.3
-                        let creep = sqrt(t) * (0.10 + Double(i % 4) * 0.035)
-                        let breathe = 1 + sin(t * (0.42 + Double(i) * 0.06) + phase) * 0.16
-                        let r = unit * (0.035 + reach * (0.55 + Double(i % 3) * 0.22)) * breathe
-                        let dx = cos(phase * 2 + t * 0.18) * unit * (0.05 + creep) * 0.9
-                        let dy = sin(phase * 1.7 + t * 0.15) * unit * (0.05 + creep) * 0.75
-                        Circle()
-                            .fill(.white.opacity(0.92))
-                            .frame(width: r * 2, height: r * 2)
-                            .blur(radius: unit * 0.11)
-                            .position(x: cx + dx, y: cy + dy)
-                    }
+            let reach = 0.040 + sqrt(t) * 0.15
+            let unit = min(stage.width, stage.height)
+            ZStack {
+                ForEach(0..<10, id: \.self) { i in
+                    let phase = Double(i) * 2.3
+                    let creep = sqrt(t) * (0.09 + Double(i % 4) * 0.03)
+                    let breathe = 1 + sin(t * (0.42 + Double(i) * 0.06) + phase) * 0.17
+                    let r = unit * (0.030 + reach * (0.55 + Double(i % 3) * 0.24)) * breathe
+                    let dx = cos(phase * 2 + t * 0.16) * unit * (0.04 + creep)
+                    let dy = sin(phase * 1.7 + t * 0.14) * unit * (0.04 + creep)
+                    Circle()
+                        .fill(RadialGradient(colors: [green, deep.opacity(0.85)],
+                                             center: .center, startRadius: 0, endRadius: r))
+                        .frame(width: r * 2, height: r * 2)
+                        .blur(radius: unit * 0.10)
+                        .position(x: origin.x + dx, y: origin.y + dy)
                 }
-                .frame(width: w, height: h)
-                .opacity(min(1, 0.15 + t * 0.9))
             }
-            .ignoresSafeArea()
+            .frame(width: stage.width, height: stage.height)
+            .opacity(min(1, 0.2 + t * 0.9))
         }
+        .allowsHitTesting(false)
     }
 }
 
