@@ -602,13 +602,13 @@ private struct BloomMark: View {
             let t = context.date.timeIntervalSince(start)
             let shown = min(1, max(0, (t - 0.35) / 1.1))
             Group {
-                if let icon = AppBrand.icon {
-                    Image(nsImage: icon).resizable().interpolation(.high)
+                if let mark = AppBrand.eyeMarkUntinted ?? AppBrand.eyeMark {
+                    Image(nsImage: mark).resizable().interpolation(.high).scaledToFit()
                 } else {
                     Text("Auge").font(AppBrand.displayFont(96)).foregroundStyle(.white)
                 }
             }
-            .frame(width: 132, height: 132)
+            .frame(width: 260, height: 130)
             .opacity(shown)
             .scaleEffect(0.92 + shown * 0.08)
         }

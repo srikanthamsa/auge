@@ -77,6 +77,41 @@ enum AppBrand {
         return .system(size: size, weight: fallbackWeight)
     }
 
+    /// The transparent eye, used as a template in the menu bar and as-is over
+    /// the bloom.
+    @MainActor
+    static var eyeMark: NSImage? {
+        if let cached = eyeMarkCache { return cached }
+        guard let url = Bundle.main.url(forResource: "AugeEye", withExtension: "png"),
+              let src = NSImage(contentsOf: url) else { return nil }
+        let height: CGFloat = 15
+        let width = height * (src.size.width / max(src.size.height, 1))
+        let img = NSImage(size: NSSize(width: width, height: height))
+        img.lockFocus()
+        NSGraphicsContext.current?.imageInterpolation = .high
+        src.draw(in: NSRect(x: 0, y: 0, width: width, height: height),
+                 from: .zero, operation: .sourceOver, fraction: 1)
+        img.unlockFocus()
+        img.isTemplate = true          // tinted by the menu bar, like Peek's
+        eyeMarkCache = img
+        return img
+    }
+
+    private static var eyeMarkCache: NSImage?
+
+    /// The same eye, coloured: for the bloom, where the menu bar's tint would
+    /// flatten it.
+    @MainActor
+    static var eyeMarkUntinted: NSImage? {
+        if let cached = eyeColorCache { return cached }
+        guard let url = Bundle.main.url(forResource: "AugeEye", withExtension: "png"),
+              let src = NSImage(contentsOf: url) else { return nil }
+        eyeColorCache = src
+        return src
+    }
+
+    private static var eyeColorCache: NSImage?
+
     static var menuMark: NSImage? {
         guard let mark = image("AugeMenuMark") ?? image("AugeMarkTemplate") else {
             return NSImage(systemSymbolName: "eye", accessibilityDescription: "Auge")
@@ -120,11 +155,12 @@ private final class AugeAppDelegate: NSObject, NSApplicationDelegate {
         // Destroy any ghost items left by previous launches in the same process.
         guard statusItem == nil else { return }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem?.button?.image = AppBrand.menuMark
+        statusItem?.button?.image = AppBrand.eyeMark ?? AppBrand.menuMark
         // Template images take their tint from the button's appearance; without
         // this the eye rendered black on a dark menu bar.
-        let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        statusItem?.button?.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        // Let the button follow the menu bar's own appearance; forcing one made
+        // the template render dim.
+        statusItem?.button?.appearance = nil
         // A menu on the item, not an action: AppKit then opens it for either
         // mouse button, which an action-based item does not do reliably.
         statusItem?.menu = makeStatusMenu()
