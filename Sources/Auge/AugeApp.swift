@@ -2881,6 +2881,28 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         setPicking(false)
     }
 
+    /// Clears every record of a zap, in the site config and in the page's own
+    /// registry, then reloads. A guaranteed way back to a clean page.
+    func restoreAllZapped() {
+        config.hiddenSelectors.removeAll()
+        webView?.evaluateJavaScript("""
+        (function(){
+          try {
+            localStorage.removeItem('zapped_elements_registry');
+            if (window.__seeZapper && window.__seeZapper.reapply) { window.__seeZapper.reapply(); }
+            document.querySelectorAll('.zapper-target-hover').forEach(function(n){ n.classList.remove('zapper-target-hover'); });
+            return 'cleared';
+          } catch (e) { return 'error:' + e; }
+        })();
+        """) { value, _ in
+            debugLog("restore all -> \(String(describing: value))")
+        }
+        zapped = []
+        applyHiddenSelectors()
+        applyTuning(reload: true)
+        debugLog("restoreAllZapped done")
+    }
+
     func removeHidden(_ selector: String) {
         config.hiddenSelectors.removeAll { $0 == selector }
         MenuHover.shared.clear("uh:" + selector)
@@ -7317,6 +7339,15 @@ private struct ConfigureWidgetOverlay: View {
                             }
                             .padding(.horizontal, 10)
                             .padding(.vertical, 6)
+                        }
+
+                        HStack {
+                            Spacer()
+                            Button("Restore all") { site.restoreAllZapped() }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 10.5, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.5))
+                                .padding(.top, 6)
                         }
 
                         if site.zapped.isEmpty && site.config.hiddenSelectors.isEmpty {
