@@ -7595,7 +7595,7 @@ private struct VisionTourOverlay: View {
                             onNext: { withAnimation(.easeInOut(duration: 0.28)) { tour.next() } },
                             onBack: { withAnimation(.easeInOut(duration: 0.28)) { tour.back() } },
                             onSkip: { tour.finish() })
-                        .position(Callout.position(near: centre, in: geo.size))
+                        .position(Callout.position(below: hole, fallback: centre, in: geo.size))
                         .animation(.easeInOut(duration: 0.28), value: tour.index)
 
                     if let hole, beat.target != nil {
@@ -7642,13 +7642,15 @@ private struct Callout: View {
     let onBack: () -> Void
     let onSkip: () -> Void
 
-    static func position(near point: CGPoint, in size: CGSize) -> CGPoint {
-        let w: CGFloat = 292, h: CGFloat = 150
-        var x = point.x + w / 2 + 28
-        if x + w / 2 > size.width - 16 { x = point.x - w / 2 - 28 }
+    /// Always sits under the control it describes, never above it: a top-bar
+    /// control has no room overhead.
+    static func position(below hole: CGRect?, fallback: CGPoint, in size: CGSize) -> CGPoint {
+        let w: CGFloat = 292, h: CGFloat = 168
+        guard let hole else { return fallback }
+        var x = hole.midX
         x = min(max(x, w / 2 + 16), size.width - w / 2 - 16)
-        let y = min(max(point.y + 24, h / 2 + 16), size.height - h / 2 - 16)
-        return CGPoint(x: x, y: y)
+        let y = hole.maxY + 12 + h / 2
+        return CGPoint(x: x, y: min(y, size.height - h / 2 - 16))
     }
 
     var body: some View {
@@ -7691,7 +7693,7 @@ private struct Callout: View {
             .padding(.top, 2)
         }
         .padding(16)
-        .frame(width: 292, alignment: .leading)
+        .frame(width: 292, height: 168, alignment: .topLeading)
         .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.ultraThinMaterial))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
             .strokeBorder(.white.opacity(0.16), lineWidth: 1))
