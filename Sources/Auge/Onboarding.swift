@@ -154,15 +154,43 @@ final class OnboardingState: ObservableObject {
             }
         }
     }
-    @Published var answerIndex = 2
+    @Published var styleAnswer = 2
+    @Published var tabAnswer = 2
+    @Published var habitAnswer = 2
+    @Published var holdStart: Date?
+
+    /// What the film says back, using the answer the person actually gave.
+    var reply: String {
+        switch styleAnswer {
+        case 0: return "You think in windows."
+        case 1: return "You live in tabs."
+        default: return "Windows and tabs, both."
+        }
+    }
+
+    /// One closing line, built from how they said they work.
+    var closing: String {
+        let time: String
+        switch habitAnswer {
+        case 0: time = "every few minutes"
+        case 1: time = "every hour"
+        default: time = "all day"
+        }
+        let tabs: String
+        switch tabAnswer {
+        case 0: tabs = "a few tabs"
+        case 1: tabs = "too many tabs"
+        default: tabs = "tabs you would rather not count"
+        }
+        return "You look \(time), through \(tabs)."
+    }
     static let symbols = ["macwindow.on.rectangle", "rectangle.on.rectangle", "square.stack.3d.up"]
 
     /// Seconds each scene holds before the film moves on.
     func duration(of step: Step) -> Double? {
         switch step {
         case .question: 4.6
-        case .tabsQuestion: 4.4
-        case .habitQuestion: 4.4
+        case .tabsQuestion, .habitQuestion: nil
         case .answer: 4.6
         case .introducing: 4.8
         case .promise: 5.2
@@ -185,6 +213,10 @@ private struct OnboardingView: View {
                 backdrop(geo)
                 scene(geo)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if let start = state.holdStart {
+                    Bloom(start: start)
+                        .allowsHitTesting(false)
+                }
                 cursorLayer(geo)
                 chrome
             }
@@ -228,26 +260,25 @@ private struct OnboardingView: View {
         ZStack {
             switch state.step {
             case .question:
-                SceneText(lines: ["How do you reach the things", "you check a hundred times a day?"], size: 40)
+                SceneText(lines: ["How do you reach the things", "you check a hundred times a day?"], size: 54)
             case .tabsQuestion:
                 ChoiceScene(prompt: "How many tabs are open right now?",
                             options: ["A sensible few", "Too many to count", "Don't ask"],
-                            pick: { state.answerIndex = $0; advance() })
+                            pick: { state.tabAnswer = $0; advance() })
             case .habitQuestion:
                 ChoiceScene(prompt: "And how often do you go looking?",
                             options: ["Every few minutes", "Every hour or so", "All day, honestly"],
-                            pick: { state.answerIndex = $0; advance() })
+                            pick: { state.habitAnswer = $0; advance() })
             case .choice:
                 ChoiceScene(prompt: "Which one is you?",
                             options: ["Windows", "Tabs", "Honestly, both"],
-                            pick: { state.answerIndex = $0; advance() })
+                            pick: { state.styleAnswer = $0; advance() })
             case .answer:
-                SceneText(lines: [state.answerIndex == 2 ? "So does everyone." : "Same here.",
-                                  "There is a faster way."], size: 42)
+                SceneText(lines: [state.reply, "There is a faster way."], size: 52)
             case .introducing:
                 introduceScene
             case .promise:
-                SceneText(lines: ["Every window.", "Every tab.", "One gesture away."], size: 46)
+                SceneText(lines: ["Every window.", "Every tab.", "One gesture away."], size: 60)
             case .practice:
                 practiceScene
             case .done:
@@ -300,12 +331,11 @@ private struct OnboardingView: View {
                     .font(.system(size: 30, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.92))
             }
-            SceneText(lines: ["Press and hold to peek"], size: 26)
-            Text("Hold the key, or click anywhere to carry on.")
-                .font(.system(size: 12.5)).foregroundStyle(.white.opacity(0.38))
+            .opacity(state.holdStart == nil ? 1 : 0.25)
+            SceneText(lines: ["Press and hold \(state.shortcut)"], size: 40)
+            Text("Hold it, and keep holding.")
+                .font(.system(size: 13)).foregroundStyle(.white.opacity(0.38))
         }
-        .contentShape(Rectangle())
-        .onTapGesture { advance() }
     }
 
     private var shortcutScene: some View {
@@ -446,6 +476,7 @@ private struct OnboardingView: View {
     }
 
     private func advance() {
+        debugLog("[onb] advance from \(state.step) \(Thread.callStackSymbols.dropFirst().prefix(3).joined(separator: " | "))")
         guard let next = OnboardingState.Step(rawValue: state.step.rawValue + 1) else {
             onFinish(); return
         }
@@ -454,24 +485,71 @@ private struct OnboardingView: View {
     }
 
     private func installKeyMonitor() {
+        NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { event in
+            debugLog("[onb] mouseDown at \(event.locationInWindow) win=\(event.window?.title ?? "-") step=\(state.step)")
+            return event
+        }
         NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
             let mods = event.modifierFlags
             if state.step == .practice {
                 let held = mods.contains(.function)
                 if held != state.pressing {
                     state.pressing = held
-                    // Live preview: the real workspace opens while the key is down,
-                    // so the practice beat shows the thing it is describing.
-                    OnboardingController.shared.setStageHidden(held)
-                    NotificationCenter.default.post(name: .augePreview, object: held)
                     if held {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
-                            if state.step == .practice { advance() }
-                        }
+                        state.holdStart = Date()
+                    } else {
+                        let heldFor = state.holdStart.map { Date().timeIntervalSince($0) } ?? 0
+                        state.holdStart = nil
+                        // Releasing finishes the film: the bloom is the answer.
+                        if heldFor > 0.4 { advance() }
                     }
                 }
             }
             return event
+        }
+    }
+}
+
+/// Held Fn: green fills the screen from the middle, unevenly, like something
+/// spreading rather than an animation playing. Growth is driven by the hold
+/// clock, so it is as slow as the person holds.
+private struct Bloom: View {
+    let start: Date
+
+    private let green = Color(red: 0.20, green: 0.95, blue: 0.52)
+    private let deep = Color(red: 0.05, green: 0.62, blue: 0.34)
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 60)) { context in
+            let t = context.date.timeIntervalSince(start)
+            let eased = 1 - exp(-t * 1.05)            // fast start, long slow tail
+            GeometryReader { geo in
+                let w = geo.size.width, h = geo.size.height
+                ZStack {
+                    // Six lobes on different clocks: no side grows in step.
+                    ForEach(0..<6, id: \.self) { i in
+                        let phase = Double(i) * 1.7
+                        let breathe = 1 + sin(t * (0.55 + Double(i) * 0.09) + phase) * 0.13
+                        let r = min(w, h) * (0.16 + eased * 1.35) * breathe
+                        let dx = cos(t * (0.35 + Double(i) * 0.05) + phase) * w * 0.10 * eased
+                        let dy = sin(t * (0.29 + Double(i) * 0.06) + phase) * h * 0.13 * eased
+                        Circle()
+                            .fill(RadialGradient(colors: [green.opacity(0.55), deep.opacity(0.34)],
+                                                 center: .center, startRadius: 0, endRadius: r))
+                            .frame(width: r * 2, height: r * 2)
+                            .blur(radius: min(w, h) * 0.09)
+                            .blendMode(.plusLighter)
+                            .offset(x: dx, y: dy)
+                    }
+                    // The wash that eventually owns the screen.
+                    RadialGradient(colors: [green.opacity(0.30 * eased), deep.opacity(0.55 * eased)],
+                                   center: .center,
+                                   startRadius: 0,
+                                   endRadius: min(w, h) * (0.3 + eased * 1.1))
+                }
+                .frame(width: w, height: h)
+            }
+            .ignoresSafeArea()
         }
     }
 }
@@ -487,30 +565,40 @@ private struct ChoiceScene: View {
 
     var body: some View {
         VStack(spacing: 30) {
-            SceneText(lines: [prompt], size: 38)
+            SceneText(lines: [prompt], size: 56)
             HStack(spacing: 16) {
                 ForEach(Array(options.enumerated()), id: \.offset) { index, option in
-                    Button {
-                        pick(index)
-                    } label: {
-                        VStack(spacing: 10) {
-                            Image(systemName: OnboardingState.symbols[index % OnboardingState.symbols.count])
-                                .font(.system(size: 26, weight: .light))
-                            Text(option)
-                                .font(.system(size: 15, weight: .semibold))
-                        }
-                        .frame(width: 168, height: 132)
-                        .foregroundStyle(.white.opacity(hover.hovered == index ? 1 : 0.82))
-                        .background(RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .fill(.white.opacity(hover.hovered == index ? 0.16 : 0.07)))
-                        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .strokeBorder(.white.opacity(hover.hovered == index ? 0.4 : 0.14), lineWidth: 1))
-                        .scaleEffect(hover.hovered == index ? 1.03 : 1)
-                        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: hover.hovered)
+                    // A tap, not a Button: buttons here were firing on their own
+                    // as the scene appeared, which answered the question for the
+                    // person. A tap needs an actual click.
+                    VStack(spacing: 10) {
+                        Image(systemName: OnboardingState.symbols[index % OnboardingState.symbols.count])
+                            .font(.system(size: 26, weight: .light))
+                        Text(option)
+                            .font(.system(size: 15, weight: .semibold))
                     }
-                    .buttonStyle(.plain)
+                    .frame(width: 168, height: 132)
+                    .foregroundStyle(.white.opacity(hover.hovered == index ? 1 : 0.82))
+                    .background(RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(.white.opacity(hover.hovered == index ? 0.16 : 0.07)))
+                    .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .strokeBorder(.white.opacity(hover.hovered == index ? 0.4 : 0.14), lineWidth: 1))
+                    .scaleEffect(hover.hovered == index ? 1.03 : 1)
+                    .animation(.spring(response: 0.35, dampingFraction: 0.8), value: hover.hovered)
+                    .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .onTapGesture { if hover.armed, hover.enteredAt[index] != nil { pick(index) } }
                     .onHover { inside in
                         hover.hovered = inside ? index : (hover.hovered == index ? nil : hover.hovered)
+                        // Leave a moment before accepting a tap, so the click that
+                        // brought the window forward cannot choose for them.
+                        if inside {
+                            if hover.enteredAt[index] == nil { hover.enteredAt[index] = Date() }
+                            if !hover.armed {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { hover.armed = true }
+                            }
+                        } else {
+                            hover.enteredAt[index] = nil
+                        }
                     }
                     .opacity(fade.shown ? 1 : 0)
                     .offset(y: fade.shown ? 0 : 18)
@@ -520,12 +608,17 @@ private struct ChoiceScene: View {
             Text("Pick one — you can change your mind later.")
                 .font(.system(size: 12)).foregroundStyle(.white.opacity(0.3))
         }
-        .onAppear { DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { fade.shown = true } }
+        .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { fade.shown = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { hover.armed = true }
+        }
     }
 }
 
 private final class ChoiceHover: ObservableObject {
     @Published var hovered: Int?
+    @Published var armed = false
+    @Published var enteredAt: [Int: Date] = [:]
 }
 
 /// The finishing button: the Uiverse swirl, recoloured cyan, drawn natively —
