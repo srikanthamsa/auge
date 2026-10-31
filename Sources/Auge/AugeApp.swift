@@ -3148,6 +3148,22 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
 
     /// Reads the page's registry directly — the page's own post goes through the
     /// bridge we hide from third-party scripts, so it never arrives.
+    private var zappedPoll: Timer?
+
+    /// Zaps happen long after the load, so the list has to be read back while the
+    /// page is open — this is what the load-time read alone was missing.
+    func startZappedPoll() {
+        guard zappedPoll == nil else { return }
+        zappedPoll = Timer.scheduledTimer(withTimeInterval: 1.2, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.pullZappedRegistry() }
+        }
+    }
+
+    func stopZappedPoll() {
+        zappedPoll?.invalidate()
+        zappedPoll = nil
+    }
+
     func pullZappedRegistry() {
         webView?.evaluateJavaScript("localStorage.getItem('zapped_elements_registry') || '[]'") { [weak self] raw, _ in
             guard let self, let json = raw as? String,
