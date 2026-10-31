@@ -3188,6 +3188,9 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         webView.evaluateJavaScript("(function(){ var all = document.querySelectorAll('#__see_flash'); for (var i = 0; i < all.length; i++) { all[i].remove(); } return all.length; })()", completionHandler: nil)
         webView.customUserAgent = config.userAgent.string
         webView.appearance = config.darkMode ? NSAppearance(named: .darkAqua) : nil
+        // Zaps happen after the load, so the list is read back while the page is
+        // open; without this a zap only appeared after a manual reload.
+        startZappedPoll()
         if config.rememberScroll, scrollY > 0 {
             webView.evaluateJavaScript("window.scrollTo(0, \(Int(scrollY)));", completionHandler: nil)
         }
