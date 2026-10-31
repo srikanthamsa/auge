@@ -2708,7 +2708,10 @@ private final class SeeWebBridge: NSObject, WKScriptMessageHandler {
         case "seeZap":
             if let body = message.body as? [String: Any],
                let items = body["items"] as? [[String: Any]] {
+                debugLog("seeZap items=\(items.count) site=\(site?.title ?? "-")")
                 site?.updateZapped(items)
+            } else {
+                debugLog("seeZap malformed body=\(String(describing: message.body))")
             }
         default:
             break
@@ -2908,8 +2911,11 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         // so it has to exist before the document paints.
         controller.addUserScript(WKUserScript(source: PageScripts.authWatcher,
                                               injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        // Document start is unreliable on heavy SPAs (x.com, YouTube): the script
+        // never took, so the zapped list never reached the panel. End of document
+        // still runs before first paint matters and always lands.
         controller.addUserScript(WKUserScript(source: PageScripts.zapper,
-                                              injectionTime: .atDocumentStart, forMainFrameOnly: true))
+                                              injectionTime: .atDocumentEnd, forMainFrameOnly: true))
         controller.addUserScript(WKUserScript(source: PageScripts.hideWebViewBridge,
                                               injectionTime: .atDocumentStart, forMainFrameOnly: false))
         if config.darkMode {
@@ -2941,6 +2947,29 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
 
     func applyHiddenSelectors() {
         guard let webView else { return }
+        // Ask the page what it has zapped. Relying on the page's own load-time
+        // notify alone left the panel empty whenever that script never ran.
+        webView.evaluateJavaScript("""
+        (function(){
+          try {
+            if (window.__seeZapper && window.__seeZapper.refresh) { window.__seeZapper.refresh(); return 'refreshed'; }
+            return 'no-zapper';
+          } catch (e) { return 'error:' + e; }
+        })();
+        """) { value, _ in
+            let probe = (value as? String) ?? "nil"
+            debugLog("zapper probe -> \(probe)")
+            if probe == "no-zapper" {
+                // The document-start injection did not survive on this page, so
+                // install it now rather than leaving the panel permanently empty.
+                webView.evaluateJavaScript(PageScripts.zapper) { _, error in
+                    debugLog("zapper reinstall error=\(String(describing: error))")
+                    webView.evaluateJavaScript("window.__seeZapper && window.__seeZapper.refresh(); 'ok'") { v, _ in
+                        debugLog("zapper reinstall -> \(String(describing: v))")
+                    }
+                }
+            }
+        }
         // An empty list clears the stylesheet, which is how an "unzap" becomes
         // visible immediately instead of after a reload.
         webView.evaluateJavaScript(PageScripts.hideCSS(config.hiddenSelectors), completionHandler: nil)
@@ -7194,6 +7223,16 @@ private struct ConfigureWidgetOverlay: View {
                              : "Remove parts of the page you never use.")
                             .font(.system(size: 11))
                             .foregroundStyle(dim)
+
+                        if site.zapped.isEmpty {
+                            HStack(spacing: 6) {
+                                Text("Nothing zapped yet — hit Zap, then click the part of the page you never use.")
+                                    .font(.system(size: 10.5))
+                                    .foregroundStyle(dim.opacity(0.8))
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.top, 2)
+                        }
 
                         if !site.zapped.isEmpty {
                             VStack(spacing: 0) {
