@@ -7535,19 +7535,17 @@ final class VisionTour: ObservableObject {
     }
 
     let beats: [Beat] = [
-        Beat(target: "tb:add",
-             title: "A little window into the web.",
-             body: "Your pages live right here. Open them, move them, keep them within reach."),
-        Beat(target: "tb:add",
-             title: "Something worth keeping?",
-             body: "Add any webpage, web app, or dashboard. It'll be ready whenever you need it."),
         Beat(target: "tb:pin",
-             title: "Some things deserve a place.",
-             body: "Pin a vision so it stays floating above your other windows."),
+             title: "Want to keep Auge around?",
+             body: "While holding Fn, click the pin at the top. Release Fn and the workspace stays open. Esc or × dismisses it when you're done."),
+        Beat(target: "tb:add",
+             title: "Bring the web within reach.",
+             body: "Click Add to bring in a webpage — or drag one straight into any empty space. Watch."),
         Beat(target: nil,
              title: "That's Auge.",
              body: "Hold Fn whenever you need another look.")
     ]
+
 
     @Published var index = 0
     private let key = "auge.tour.done"
@@ -7654,6 +7652,10 @@ private struct Callout: View {
             Text(beat.title)
                 .font(AppBrand.uiFont(14, weight: .semibold))
                 .foregroundStyle(.white)
+            if beat.target == "tb:add" {
+                DragDemo()
+                    .padding(.vertical, 4)
+            }
             Text(beat.body)
                 .font(AppBrand.uiFont(12.5))
                 .foregroundStyle(.white.opacity(0.66))
@@ -7731,6 +7733,56 @@ private struct EmptyDragHint: View {
                 guard let self else { return }
                 withAnimation(.easeOut(duration: 0.6)) { self.width = 30; self.height = 22 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { self.step() }
+            }
+        }
+    }
+}
+
+
+/// Illustrates the second way in: a page is picked up, carried on a dotted path
+/// and dropped into empty workspace. Nothing is created.
+@MainActor
+private struct DragDemo: View {
+    @StateObject private var s = DragState()
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Path { p in
+                p.move(to: CGPoint(x: 34, y: 20))
+                p.addQuadCurve(to: CGPoint(x: 158, y: 54), control: CGPoint(x: 96, y: 8))
+            }
+            .stroke(.white.opacity(0.22), style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
+            .frame(width: 200, height: 74)
+
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(.white.opacity(0.14))
+                .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(.white.opacity(0.25), lineWidth: 1))
+                .frame(width: 46, height: 30)
+                .offset(x: s.dropped ? 132 : 8, y: s.dropped ? 40 : 6)
+                .scaleEffect(s.dropped ? 1.0 : 0.92)
+                .animation(.easeInOut(duration: 1.3), value: s.dropped)
+
+            Image(systemName: "cursorarrow")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(.white.opacity(0.9))
+                .offset(x: (s.dropped ? 132 : 8) + 34, y: (s.dropped ? 40 : 6) + 20)
+                .animation(.easeInOut(duration: 1.3), value: s.dropped)
+        }
+        .frame(width: 200, height: 78)
+        .onAppear { s.run() }
+    }
+
+    @MainActor
+    private final class DragState: ObservableObject {
+        @Published var dropped = false
+        func run() { schedule() }
+        private func schedule() { tick() }
+        private func tick() {
+            dropped = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
+                self?.dropped = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { self?.tick() }
             }
         }
     }
