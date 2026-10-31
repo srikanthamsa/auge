@@ -318,7 +318,7 @@ private struct OnboardingView: View {
             case .practice:
                 practiceScene
             case .letGo:
-                SceneText(lines: ["You let go.", "Don't worry, we all do at some point."], size: 50)
+                SceneText(lines: ["You let go, didn't you?", "It's okay. They all did too."], size: 48)
             case .done:
                 doneScene
             }
@@ -434,30 +434,60 @@ private struct OnboardingView: View {
     }
 
     private var doneScene: some View {
-        VStack(spacing: 20) {
-            ZStack {
-                Circle()
-                    .fill(Color(red: 0.30, green: 0.95, blue: 0.55).opacity(0.45))
-                    .frame(width: 84, height: 84)
-                    .blur(radius: 26)
-                Circle()
-                    .fill(Color(red: 0.34, green: 0.99, blue: 0.60).opacity(0.35))
-                    .frame(width: 56, height: 56)
-                    .blur(radius: 12)
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 50, weight: .regular))
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(.white, Color(red: 0.26, green: 0.92, blue: 0.52))
-                    .shadow(color: Color(red: 0.30, green: 1.0, blue: 0.58).opacity(0.9), radius: 14)
+        VStack(spacing: 0) {
+            if let mark = AppBrand.eyeMarkUntinted ?? AppBrand.eyeMark {
+                Image(nsImage: mark)
+                    .resizable().interpolation(.high).scaledToFit()
+                    .frame(width: 118, height: 60)
+                    .shadow(color: Color(red: 0.55, green: 0.72, blue: 1).opacity(0.45), radius: 24)
+                    .opacity(ui.appeared ? 1 : 0)
+                    .animation(.easeOut(duration: 0.55), value: ui.appeared)
             }
-            SceneText(lines: ["New ability unlocked.", "See Beyond."], size: 40)
-            Text("Hold \(state.shortcut) anywhere to peek.")
-                .font(AppBrand.uiFont(14)).foregroundStyle(.white.opacity(0.5))
-            GlowButton(title: "See Beyond") { onFinish() }
-                .padding(.top, 14)
+
+            VStack(spacing: 7) {
+                Text("A new way to see things.")
+                    .font(AppBrand.uiFont(30, weight: .semibold))
+                    .tracking(-0.2)
+                    .foregroundStyle(.white.opacity(0.96))
+                Text("Meet Auge.")
+                    .font(AppBrand.uiFont(17))
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+            .padding(.top, 30)
+            .opacity(ui.stage2 ? 1 : 0)
+            .offset(y: ui.stage2 ? 0 : 6)
+            .animation(.easeOut(duration: 0.5), value: ui.stage2)
+
+            HStack(spacing: 9) {
+                Text("Hold").font(AppBrand.uiFont(14)).foregroundStyle(.white.opacity(0.55))
+                Keycap(text: state.shortcut)
+                Text("to peek").font(AppBrand.uiFont(14)).foregroundStyle(.white.opacity(0.55))
+            }
+            .padding(.top, 30)
+            .opacity(ui.stage3 ? 1 : 0)
+            .animation(.easeOut(duration: 0.5), value: ui.stage3)
+
+            PrimaryButton(title: "Open Auge") { onFinish() }
+                .padding(.top, 34)
+                .opacity(ui.stage4 ? 1 : 0)
+                .animation(.easeOut(duration: 0.5), value: ui.stage4)
+
+            Text("Your web. Within reach.")
+                .font(AppBrand.uiFont(12)).tracking(0.6)
+                .foregroundStyle(.white.opacity(0.28))
+                .padding(.top, 22)
+                .opacity(ui.stage4 ? 1 : 0)
+                .animation(.easeOut(duration: 0.6), value: ui.stage4)
         }
-        .onAppear { ui.cursorVisible = false }
+        .onAppear {
+            ui.cursorVisible = false
+            ui.appeared = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { ui.stage2 = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.62) { ui.stage3 = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.92) { ui.stage4 = true }
+        }
     }
+
 
     // MARK: cursor
 
@@ -629,9 +659,9 @@ private struct Bloom: View {
 /// instead of seven straight reads.
 /// Slow blink, and a fade out after the last line.
 private func labelOpacity(_ t: TimeInterval) -> Double {
-    let inOpacity = min(1, max(0, (t - 0.55) / 0.7))
-    let blink = 0.62 + 0.38 * (0.5 + 0.5 * cos(t * 2.0))
-    let out = t > 4.4 ? max(0, 1 - (t - 4.4) / 0.9) : 1
+    let inOpacity = min(1, max(0, (t - 0.7) / 1.1))
+    let blink = 0.6 + 0.4 * (0.5 + 0.5 * cos(t * 1.15))
+    let out = t > 6.2 ? max(0, 1 - (t - 6.2) / 1.3) : 1
     return inOpacity * blink * out
 }
 
@@ -656,14 +686,14 @@ private struct BloomMark: View {
             .opacity(shown)
             .scaleEffect(0.92 + shown * 0.08)
             .overlay(alignment: .bottom) {
-                Text(t < 2.2 ? "Keep holding." : "Don't let go.")
-                    .font(AppBrand.uiFont(19, weight: .medium))
-                    .tracking(0.4)
+                Text(t < 3.4 ? "Keep holding." : "Don't let go.")
+                    .font(AppBrand.displayFont(30))
+                    .tracking(1.2)
                     .foregroundStyle(.white)
                     .fixedSize()
-                    .offset(y: 74)
+                    .offset(y: 92)
                     .opacity(labelOpacity(t))
-                    .animation(.easeInOut(duration: 0.35), value: t < 2.2)
+                    .animation(.easeInOut(duration: 0.6), value: t < 3.4)
             }
         }
     }
@@ -836,6 +866,69 @@ private struct AnswerCard: View {
         .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .onTapGesture { action() }
     }
+}
+
+/// The shortcut, drawn as a key.
+private struct Keycap: View {
+    let text: String
+    var body: some View {
+        Text(text)
+            .font(AppBrand.uiFont(13, weight: .medium))
+            .foregroundStyle(.white.opacity(0.92))
+            .padding(.horizontal, 11)
+            .frame(height: 26)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(.white.opacity(0.10))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .strokeBorder(.white.opacity(0.16), lineWidth: 1)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(LinearGradient(colors: [.white.opacity(0.10), .clear],
+                                         startPoint: .top, endPoint: .center))
+            )
+    }
+}
+
+/// The closing action: light material, dark type, no glow.
+private struct PrimaryButton: View {
+    let title: String
+    let action: () -> Void
+    @StateObject private var hover = HoverFlag()
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                Text(title)
+                    .font(AppBrand.uiFont(14, weight: .semibold))
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .foregroundStyle(Color(red: 0.07, green: 0.07, blue: 0.09))
+            .padding(.horizontal, 22)
+            .frame(height: 42)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color(white: hover.on ? 1.0 : 0.94))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(.white.opacity(hover.on ? 0.5 : 0.25), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.35), radius: 10, y: 3)
+            .scaleEffect(hover.on ? 1.01 : 1)
+            .animation(.easeOut(duration: 0.16), value: hover.on)
+        }
+        .buttonStyle(.plain)
+        .onHover { hover.on = $0 }
+    }
+}
+
+private final class HoverFlag: ObservableObject {
+    @Published var on = false
 }
 
 private struct GlowButton: View {
@@ -1104,6 +1197,9 @@ private struct SettingsMock: View {
 // this package, so tiny observable holders stand in for it.
 
 private final class StageUI: ObservableObject {
+    @Published var stage2 = false
+    @Published var stage3 = false
+    @Published var stage4 = false
     @Published var appeared = false
     @Published var cursor = CGPoint(x: 0.5, y: 0.62)
     @Published var cursorVisible = false
