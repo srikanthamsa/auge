@@ -114,9 +114,9 @@ private final class AugeAppDelegate: NSObject, NSApplicationDelegate {
         // this the eye rendered black on a dark menu bar.
         let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         statusItem?.button?.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-        statusItem?.button?.action = #selector(statusItemClicked)
-        statusItem?.button?.target = self
-        statusItem?.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        // A menu on the item, not an action: AppKit then opens it for either
+        // mouse button, which an action-based item does not do reliably.
+        statusItem?.menu = makeStatusMenu()
         statusItem?.button?.toolTip = "See Beyond."
         // First run: the introduction owns the screen; the workspace follows it.
         if !OnboardingController.shared.hasCompleted {
@@ -142,17 +142,22 @@ private final class AugeAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func showStatusMenu() {
-        guard let button = statusItem?.button else { return }
+    private func makeStatusMenu() -> NSMenu {
         let menu = NSMenu()
-        menu.addItem(withTitle: "Play Introduction…", action: #selector(showIntroduction), keyEquivalent: "")
         menu.addItem(withTitle: "Show Workspace", action: #selector(togglePanel), keyEquivalent: "")
+        menu.addItem(withTitle: "Play Introduction…", action: #selector(showIntroduction), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "About Auge", action: #selector(showAbout), keyEquivalent: "")
         menu.addItem(withTitle: "Quit Auge", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         for item in menu.items { item.target = self }
+        return menu
+    }
+
+    private func showStatusMenu() {
+        guard let button = statusItem?.button else { return }
         NSApp.activate(ignoringOtherApps: true)
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 6), in: button)
+        makeStatusMenu().popUp(positioning: nil,
+                               at: NSPoint(x: 0, y: button.bounds.height + 6), in: button)
     }
 
     private func observePreview() {

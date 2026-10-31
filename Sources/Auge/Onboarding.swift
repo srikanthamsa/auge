@@ -190,7 +190,7 @@ final class OnboardingState: ObservableObject {
     /// Seconds each scene holds before the film moves on.
     func duration(of step: Step) -> Double? {
         switch step {
-        case .question: 4.6
+        case .question: 6.6
         case .tabsQuestion, .habitQuestion: nil
         case .answer: 4.6
         case .introducing: 4.8
@@ -323,15 +323,24 @@ private struct OnboardingView: View {
     private var practiceScene: some View {
         VStack(spacing: 18) {
             ZStack {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(.white.opacity(state.pressing ? 0.24 : 0.08))
-                    .frame(width: 104, height: 104)
-                    .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .strokeBorder(.white.opacity(0.22), lineWidth: 1))
-                    .shadow(color: .white.opacity(state.pressing ? 0.35 : 0), radius: 24)
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(LinearGradient(colors: [.white.opacity(state.pressing ? 0.30 : 0.16),
+                                                  .white.opacity(state.pressing ? 0.16 : 0.06)],
+                                         startPoint: .top, endPoint: .bottom))
+                    .frame(width: 116, height: 116)
+                    .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .strokeBorder(LinearGradient(colors: [.white.opacity(0.55), .white.opacity(0.10)],
+                                                     startPoint: .top, endPoint: .bottom), lineWidth: 1))
+                    .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .inset(by: 7)
+                        .strokeBorder(.white.opacity(0.08), lineWidth: 1))
+                    .shadow(color: .black.opacity(0.35), radius: 12, y: 6)
+                    .shadow(color: .white.opacity(state.pressing ? 0.30 : 0), radius: 26)
                 Text(state.shortcut)
-                    .font(.system(size: 30, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.92))
+                    .font(.system(size: 34, weight: .medium, design: .rounded))
+                    .tracking(0.5)
+                    .foregroundStyle(LinearGradient(colors: [.white, .white.opacity(0.72)],
+                                                    startPoint: .top, endPoint: .bottom))
             }
             .background(GeometryReader { g in
                 Color.clear
@@ -390,8 +399,21 @@ private struct OnboardingView: View {
 
     private var doneScene: some View {
         VStack(spacing: 20) {
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 48)).foregroundStyle(Color(red: 0.36, green: 0.85, blue: 0.52))
+            ZStack {
+                Circle()
+                    .fill(Color(red: 0.30, green: 0.95, blue: 0.55).opacity(0.45))
+                    .frame(width: 84, height: 84)
+                    .blur(radius: 26)
+                Circle()
+                    .fill(Color(red: 0.34, green: 0.99, blue: 0.60).opacity(0.35))
+                    .frame(width: 56, height: 56)
+                    .blur(radius: 12)
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 50, weight: .regular))
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, Color(red: 0.26, green: 0.92, blue: 0.52))
+                    .shadow(color: Color(red: 0.30, green: 1.0, blue: 0.58).opacity(0.9), radius: 14)
+            }
             SceneText(lines: ["You're all set."], size: 34)
             Text("Hold \(state.shortcut) anywhere to peek.")
                 .font(.system(size: 14)).foregroundStyle(.white.opacity(0.5))
@@ -586,7 +608,17 @@ private struct ChoiceScene: View {
                     // person. A tap needs an actual click.
                     VStack(spacing: 10) {
                         Image(systemName: OnboardingState.symbols[index % OnboardingState.symbols.count])
-                            .font(.system(size: 26, weight: .light))
+                            .font(.system(size: 27, weight: .regular))
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundStyle(LinearGradient(colors: [.white, .white.opacity(0.55)],
+                                                            startPoint: .top, endPoint: .bottom))
+                            .frame(width: 52, height: 52)
+                            .background(
+                                Circle()
+                                    .fill(LinearGradient(colors: [.white.opacity(0.16), .white.opacity(0.04)],
+                                                         startPoint: .top, endPoint: .bottom))
+                            )
+                            .overlay(Circle().strokeBorder(.white.opacity(0.16), lineWidth: 1))
                         Text(option)
                             .font(.system(size: 15, weight: .semibold))
                     }
