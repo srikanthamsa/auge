@@ -3010,7 +3010,12 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
             exitChromeMode()
             webView.evaluateJavaScript("window.__seeZapper && window.__seeZapper.enable();", completionHandler: nil)
         } else {
-            webView.evaluateJavaScript("window.__seeZapper && window.__seeZapper.disable();", completionHandler: nil)
+            // Ask the page for its list as the picking session ends: the page's
+            // own post on each zap is not reliable, and this is the moment the
+            // panel is about to show what was removed.
+            webView.evaluateJavaScript("window.__seeZapper && window.__seeZapper.disable(); window.__seeZapper && window.__seeZapper.refresh(); 'asked'") { value, error in
+                debugLog("zap pull -> \(String(describing: value)) err=\(String(describing: error))")
+            }
             refreshChromeSnapshot()
         }
         webHost?.refreshHandles()
@@ -7224,7 +7229,37 @@ private struct ConfigureWidgetOverlay: View {
                             .font(.system(size: 11))
                             .foregroundStyle(dim)
 
-                        if site.zapped.isEmpty {
+                        if let wv = site.webView {
+                            Color.clear.frame(height: 0)
+                                .onAppear {
+                                    wv.evaluateJavaScript("window.__seeZapper && window.__seeZapper.refresh(); 'ok'") { _, _ in }
+                                }
+                        }
+
+                        // CSS zaps applied by the picker live in the site config,
+                        // not in the page registry, so they are listed here too.
+                        ForEach(site.config.hiddenSelectors, id: \.self) { selector in
+                            HStack(spacing: 8) {
+                                Circle().fill(Color(red: 0.36, green: 0.62, blue: 1.0).opacity(0.85))
+                                    .frame(width: 5, height: 5)
+                                Text(selector)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(.white.opacity(0.8))
+                                    .lineLimit(1).truncationMode(.middle)
+                                Spacer(minLength: 4)
+                                Button { site.removeHidden(selector) } label: {
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 8.5, weight: .bold))
+                                        .foregroundStyle(.white.opacity(0.55))
+                                        .frame(width: 18, height: 18)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                        }
+
+                        if site.zapped.isEmpty && site.config.hiddenSelectors.isEmpty {
                             HStack(spacing: 6) {
                                 Text("Nothing zapped yet — hit Zap, then click the part of the page you never use.")
                                     .font(.system(size: 10.5))
