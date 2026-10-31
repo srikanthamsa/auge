@@ -82,9 +82,9 @@ enum AppBrand {
     @MainActor
     static var eyeMark: NSImage? {
         if let cached = eyeMarkCache { return cached }
-        guard let url = Bundle.main.url(forResource: "AugeEye", withExtension: "png"),
+        guard let url = Bundle.main.url(forResource: "AugeEyeBar", withExtension: "png"),
               let src = NSImage(contentsOf: url) else { return nil }
-        let height: CGFloat = 16
+        let height: CGFloat = 17
         let width = height * (src.size.width / max(src.size.height, 1))
         let img = NSImage(size: NSSize(width: width, height: height))
         img.lockFocus()
