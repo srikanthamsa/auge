@@ -3331,8 +3331,12 @@ private struct WebsiteView: NSViewRepresentable {
         host.onClose = onClose
         host.onPick = onPick
         site.webView = host.webView
-        guard context.coordinator.lastRequestID != site.requestID else { return }
+        // A recreated host has a fresh, blank web view. The request id is the same,
+        // so this used to skip the load and leave the surface on about:blank.
+        let blank = host.webView.url == nil
+        guard context.coordinator.lastRequestID != site.requestID || blank else { return }
         context.coordinator.lastRequestID = site.requestID
+        if blank { debugLog("site \(site.title) was blank, loading \(site.requestedURL.absoluteString)") }
         site.load(into: host.webView)
     }
 
