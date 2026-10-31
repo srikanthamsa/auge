@@ -2865,6 +2865,30 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
 
     /// Push the current configuration into the live web view.
     /// Single path for restoring a zapped element: model, page, persistence.
+    /// Puts back everything the page has hidden, then reloads.
+    func restoreAllZaps() {
+        config.hiddenSelectors.removeAll()
+        webView?.evaluateJavaScript("""
+        (function(){
+          try {
+            var raw = localStorage.getItem('zapped_elements_registry');
+            var list = [];
+            try { list = JSON.parse(raw || '[]'); } catch (e) {}
+            localStorage.setItem('zapped_elements_registry', '[]');
+            if (window.__seeZapper && window.__seeZapper.clearAll) { window.__seeZapper.clearAll(); }
+            if (window.__seeZapper && window.__seeZapper.refresh) { window.__seeZapper.refresh(); }
+            return 'cleared ' + list.length;
+          } catch (e) { return 'error:' + e; }
+        })();
+        """) { value, _ in
+            debugLog("restore all -> \(String(describing: value))")
+        }
+        zapped = []
+        applyHiddenSelectors()
+        applyTuning(reload: false)
+        pullZappedRegistry()
+    }
+
     func removeHidden(_ selector: String) {
         config.hiddenSelectors.removeAll { $0 == selector }
         MenuHover.shared.clear("uh:" + selector)
@@ -3061,6 +3085,7 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
                                  classes: item["classes"] as? String ?? "",
                                  snippet: item["snippet"] as? String ?? "")
         }
+        debugLog("zapped list \(mapped.count) for \(title)")
         if mapped.map(\.id) != zapped.map(\.id) { zapped = mapped }
         if isPickingElements, !mapped.isEmpty, let last = mapped.last {
             debugLog("zapper added \(last.tag).\(last.classes) total=\(mapped.count)")
@@ -3092,16 +3117,44 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     func stopZapper() { webView?.evaluateJavaScript("window.__seeZapper && window.__seeZapper.disable();", completionHandler: nil) }
 
     func restoreZapped(_ id: String) {
-        webView?.evaluateJavaScript("window.__seeZapper && window.__seeZapper.restore(\"\(id)\");", completionHandler: nil)
-        MenuHover.shared.clear("uz:" + id)
+        webView?.evaluateJavaScript("window.__seeZapper && window.__seeZapper.restore(\"\(id)\");") { [weak self] _, _ in
+            guard let self else { return }
+            MenuHover.shared.clear("uz:" + id)
+            self.pullZappedRegistry()
+            self.refreshChromeSnapshot()
+        }
         debugLog("zapper restore \(id)")
-        refreshChromeSnapshot()
     }
 
     func clearZapped() {
-        webView?.evaluateJavaScript("window.__seeZapper && window.__seeZapper.clearAll();", completionHandler: nil)
+        webView?.evaluateJavaScript("""
+        (function(){
+          try {
+            localStorage.setItem('zapped_elements_registry', '[]');
+            if (window.__seeZapper && window.__seeZapper.clearAll) { window.__seeZapper.clearAll(); }
+            return 'cleared';
+          } catch (e) { return 'error:' + e; }
+        })();
+        """) { [weak self] _, _ in
+            guard let self else { return }
+            self.config.hiddenSelectors.removeAll()
+            self.zapped = []
+            self.applyHiddenSelectors()
+            self.pullZappedRegistry()
+            self.refreshChromeSnapshot()
+        }
         debugLog("zapper clear all")
-        refreshChromeSnapshot()
+    }
+
+    /// Reads the page's registry directly — the page's own post goes through the
+    /// bridge we hide from third-party scripts, so it never arrives.
+    func pullZappedRegistry() {
+        webView?.evaluateJavaScript("localStorage.getItem('zapped_elements_registry') || '[]'") { [weak self] raw, _ in
+            guard let self, let json = raw as? String,
+                  let data = json.data(using: .utf8),
+                  let items = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
+            self.updateZapped(items)
+        }
     }
 
     func refreshChromeSnapshot() {
@@ -3122,7 +3175,34 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
         if config.rememberScroll, scrollY > 0 {
             webView.evaluateJavaScript("window.scrollTo(0, \(Int(scrollY)));", completionHandler: nil)
         }
-        webView.evaluateJavaScript("window.__seeZapper && window.__seeZapper.refresh();", completionHandler: nil)
+        // Ask the page what it has hidden, and install the zapper when the
+        // document-start injection did not take — otherwise the panel never gets
+        // the list even though elements really are removed.
+        webView.evaluateJavaScript("""
+        (function(){
+          try {
+            if (window.__seeZapper && window.__seeZapper.refresh) { window.__seeZapper.refresh(); return 'refreshed'; }
+            return 'no-zapper';
+          } catch (e) { return 'error:' + e; }
+        })();
+        """) { [weak self] value, _ in
+            let probe = (value as? String) ?? "nil"
+            debugLog("zap probe -> \(probe)")
+            guard let self else { return }
+            // Read the registry directly: the page's own post goes through the
+            // bridge we deliberately hide from third-party scripts, so it never
+            // arrived and the panel stayed empty.
+            webView.evaluateJavaScript("localStorage.getItem('zapped_elements_registry') || '[]'") { [weak self] raw, _ in
+                guard let self, let json = raw as? String,
+                      let data = json.data(using: .utf8),
+                      let items = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
+                self.updateZapped(items)
+            }
+            guard probe == "no-zapper" else { return }
+            webView.evaluateJavaScript(PageScripts.zapper) { _, _ in
+                webView.evaluateJavaScript("window.__seeZapper && window.__seeZapper.refresh(); 'ok'", completionHandler: nil)
+            }
+        }
         if isPickingElements {
             webView.evaluateJavaScript("window.__seeZapper && window.__seeZapper.enable();", completionHandler: nil)
         }
@@ -7150,7 +7230,17 @@ private struct ConfigureWidgetOverlay: View {
                             Text("Zap Elements")
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundStyle(ink)
-                            if !site.zapped.isEmpty {
+                            Button {
+                            site.restoreAllZaps()
+                        } label: {
+                            Text("Restore all")
+                                .font(.system(size: 10.5, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.5))
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, 2)
+
+                        if !site.zapped.isEmpty {
                                 Text("\(site.zapped.count)")
                                     .font(.system(size: 9.5, weight: .semibold))
                                     .monospacedDigit()
