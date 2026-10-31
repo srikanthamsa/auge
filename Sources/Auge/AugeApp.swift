@@ -61,6 +61,15 @@ enum AppBrand {
     /// Google Sans when it is installed, otherwise the system face. Any font
     /// dropped into the app Resources is registered at launch, so this picks it
     /// up without another change.
+    /// NSFont version of the display face, for AppKit surfaces.
+    @MainActor
+    static func displayFontNS(_ size: CGFloat) -> NSFont? {
+        for name in ["COURAGESDEMORegular", "COURAGES DEMO", "CouragesDemo", "Courages"] {
+            if let f = NSFont(name: name, size: size) { return f }
+        }
+        return nil
+    }
+
     @MainActor
     static func uiFont(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
         // Google Sans and Product Sans are proprietary and are not installed on
@@ -296,7 +305,13 @@ private final class AugeAppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func showAbout() {
         let alert = NSAlert()
-        alert.messageText = "Auge"
+        // The wordmark is set in the house face, like everywhere else it appears.
+        let wordmark = NSTextField(labelWithString: "AUGE")
+        wordmark.font = AppBrand.displayFontNS(24) ?? NSFont.systemFont(ofSize: 24, weight: .bold)
+        wordmark.alignment = .center
+        wordmark.frame = NSRect(x: 0, y: 0, width: 240, height: 34)
+        alert.messageText = ""
+        alert.accessoryView = wordmark
         alert.informativeText = "See Beyond.\n\nWebsites, files and widgets in a freeform workspace."
         if let icon = AppBrand.icon { alert.icon = icon }
         alert.addButton(withTitle: "OK")

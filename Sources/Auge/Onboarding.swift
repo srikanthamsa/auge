@@ -446,11 +446,11 @@ private struct OnboardingView: View {
 
             VStack(spacing: 7) {
                 Text("A new way to see things.")
-                    .font(AppBrand.uiFont(30, weight: .semibold))
-                    .tracking(-0.2)
+                    .font(AppBrand.uiFont(48, weight: .semibold))
+                    .tracking(-0.6)
                     .foregroundStyle(.white.opacity(0.96))
                 Text("Meet Auge.")
-                    .font(AppBrand.uiFont(17))
+                    .font(AppBrand.uiFont(19))
                     .foregroundStyle(.white.opacity(0.5))
             }
             .padding(.top, 30)
