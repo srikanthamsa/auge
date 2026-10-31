@@ -64,7 +64,7 @@ final class OnboardingController {
     private func finish() {
         window?.alphaValue = 1
         NotificationCenter.default.post(name: .augePreview, object: false)
-        OnboardingAudio.shared.stop()
+        OnboardingAudio.shared.fadeOutAndStop(1.1)
         UserDefaults.standard.set(true, forKey: Self.doneKey)
         window?.orderOut(nil)
         window = nil
@@ -118,6 +118,16 @@ final class OnboardingAudio {
         player?.setVolume(muted ? 0 : 0.5, fadeDuration: 0.35)
     }
 
+    /// Fades the score away instead of cutting it, then releases the player.
+    func fadeOutAndStop(_ seconds: TimeInterval = 1.2) {
+        guard let p = player else { return }
+        player = nil
+        p.setVolume(0, fadeDuration: seconds)
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak p] in
+            p?.stop()
+        }
+    }
+
     func stop() {
         player?.stop()
         player = nil
@@ -132,7 +142,7 @@ private final class OnboardingWindow: NSWindow {
 @MainActor
 final class OnboardingState: ObservableObject {
     enum Step: Int, CaseIterable {
-        case question, tabsQuestion, habitQuestion, choice, answer, introducing, promise, practice, done
+        case question, tabsQuestion, habitQuestion, choice, answer, introducing, promise, practice, letGo, done
     }
     @Published var step: Step = .question
     @Published var shortcut = "Fn"
@@ -198,6 +208,7 @@ final class OnboardingState: ObservableObject {
         case .answer: 4.6
         case .introducing: 4.8
         case .promise: 5.2
+        case .letGo: 2.9
         default: nil          // choice, practice and done wait for the person
         }
     }
@@ -270,21 +281,21 @@ private struct OnboardingView: View {
                 SceneText(lines: ["How do you reach the things", "you check a hundred times a day?"], size: 54)
             case .tabsQuestion:
                 ChoiceScene(prompt: "How many tabs are open right now?",
-                            options: [AnswerOption(title: "A sensible few", subtitle: "I keep things organised."),
-                                      AnswerOption(title: "Too many to count", subtitle: "It's getting out of hand."),
-                                      AnswerOption(title: "Don't ask", subtitle: "We don't talk about that.")],
+                            options: [AnswerOption(title: "A sensible few", subtitle: "I keep things organised.", symbol: "square.stack.3d.up"),
+                                      AnswerOption(title: "Too many to count", subtitle: "It's getting out of hand.", symbol: "rectangle.stack"),
+                                      AnswerOption(title: "Don't ask", subtitle: "We don't talk about that.", symbol: "eye.slash")],
                             pick: { state.tabAnswer = $0; advance() })
             case .habitQuestion:
                 ChoiceScene(prompt: "And how often do you go looking?",
-                            options: [AnswerOption(title: "Every few minutes", subtitle: "I'm constantly checking."),
-                                      AnswerOption(title: "Every hour or so", subtitle: "Just checking in occasionally."),
-                                      AnswerOption(title: "All day, honestly", subtitle: "It's practically a reflex.")],
+                            options: [AnswerOption(title: "Every few minutes", subtitle: "I'm constantly checking.", symbol: "clock.arrow.circlepath"),
+                                      AnswerOption(title: "Every hour or so", subtitle: "Just checking in occasionally.", symbol: "clock"),
+                                      AnswerOption(title: "All day, honestly", subtitle: "It's practically a reflex.", symbol: "sun.max")],
                             pick: { state.habitAnswer = $0; advance() })
             case .choice:
                 ChoiceScene(prompt: "Which one is you?",
-                            options: [AnswerOption(title: "Windows", subtitle: "One window, one task."),
-                                      AnswerOption(title: "Tabs", subtitle: "Everything in one place."),
-                                      AnswerOption(title: "Honestly, both", subtitle: "Depends on the day.")],
+                            options: [AnswerOption(title: "Windows", subtitle: "One window, one task.", symbol: "macwindow"),
+                                      AnswerOption(title: "Tabs", subtitle: "Everything in one place.", symbol: "rectangle.on.rectangle"),
+                                      AnswerOption(title: "Honestly, both", subtitle: "Depends on the day.", symbol: "circle.grid.2x2")],
                             pick: { state.styleAnswer = $0; advance() })
             case .answer:
                 SceneText(lines: [state.reply, "There is a faster way."], size: 52)
@@ -294,6 +305,8 @@ private struct OnboardingView: View {
                 SceneText(lines: ["Every window. Every tab.", "One gesture away."], size: 58)
             case .practice:
                 practiceScene
+            case .letGo:
+                SceneText(lines: ["You let go.", "That's the point."], size: 52)
             case .done:
                 doneScene
             }
@@ -550,7 +563,7 @@ private struct OnboardingView: View {
                         let heldFor = state.holdStart.map { Date().timeIntervalSince($0) } ?? 0
                         state.holdStart = nil
                         // Releasing finishes the film: the bloom is the answer.
-                        if heldFor > 0.4 { advance() }
+                        if heldFor > 0.4 { advance() }   // -> letGo
                     }
                 }
             }
@@ -629,6 +642,7 @@ private struct BloomMark: View {
 struct AnswerOption {
     let title: String
     let subtitle: String
+    var symbol: String = "circle"
 }
 
 private struct ChoiceScene: View {
@@ -744,7 +758,12 @@ private struct AnswerCard: View {
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            VStack(spacing: 5) {
+            VStack(spacing: 7) {
+                Image(systemName: option.symbol)
+                    .font(.system(size: 19, weight: .regular))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.white.opacity(selected ? 0.92 : 0.55))
+                    .padding(.bottom, 2)
                 Text(option.title)
                     .font(AppBrand.uiFont(16, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.94))
@@ -767,7 +786,7 @@ private struct AnswerCard: View {
                     .transition(.opacity.combined(with: .scale(scale: 0.8)))
             }
         }
-        .frame(width: 204, height: 96)
+        .frame(width: 204, height: 128)
         .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(fill))
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
