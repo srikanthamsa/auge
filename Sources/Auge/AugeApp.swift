@@ -2904,6 +2904,23 @@ private final class WebsiteSurface: ObservableObject, Identifiable {
     }
 
     func removeHidden(_ selector: String) {
+        // A zap hides the element inline as well as through CSS, so clearing the
+        // stored selector alone left it invisible until a reload.
+        if let data = try? JSONEncoder().encode(selector),
+           let json = String(data: data, encoding: .utf8) {
+            webView?.evaluateJavaScript("""
+            (function(){
+              try {
+                document.querySelectorAll(\(json)).forEach(function(el){
+                  el.style.removeProperty('display');
+                });
+                return 'shown';
+              } catch (e) { return 'error:' + e; }
+            })();
+            """) { value, _ in
+                debugLog("unzap \(selector) -> \(String(describing: value))")
+            }
+        }
         config.hiddenSelectors.removeAll { $0 == selector }
         MenuHover.shared.clear("uh:" + selector)
         debugLog("unhide \(selector) remaining=\(config.hiddenSelectors.count)")
