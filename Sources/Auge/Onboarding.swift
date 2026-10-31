@@ -167,7 +167,7 @@ final class OnboardingState: ObservableObject {
     var reply: String {
         switch styleAnswer {
         case 0: return "That's literally 71% of people."
-        case 1: return "That's 96% of people. Every one of them."
+        case 1: return "That's 96% of people. Practically everyone."
         default: return "That's literally 88% of people."
         }
     }
@@ -270,15 +270,21 @@ private struct OnboardingView: View {
                 SceneText(lines: ["How do you reach the things", "you check a hundred times a day?"], size: 54)
             case .tabsQuestion:
                 ChoiceScene(prompt: "How many tabs are open right now?",
-                            options: ["A sensible few", "Too many to count", "Don't ask"],
+                            options: [AnswerOption(title: "A sensible few", subtitle: "I keep things organised."),
+                                      AnswerOption(title: "Too many to count", subtitle: "It's getting out of hand."),
+                                      AnswerOption(title: "Don't ask", subtitle: "We don't talk about that.")],
                             pick: { state.tabAnswer = $0; advance() })
             case .habitQuestion:
                 ChoiceScene(prompt: "And how often do you go looking?",
-                            options: ["Every few minutes", "Every hour or so", "All day, honestly"],
+                            options: [AnswerOption(title: "Every few minutes", subtitle: "I'm constantly checking."),
+                                      AnswerOption(title: "Every hour or so", subtitle: "Just checking in occasionally."),
+                                      AnswerOption(title: "All day, honestly", subtitle: "It's practically a reflex.")],
                             pick: { state.habitAnswer = $0; advance() })
             case .choice:
                 ChoiceScene(prompt: "Which one is you?",
-                            options: ["Windows", "Tabs", "Honestly, both"],
+                            options: [AnswerOption(title: "Windows", subtitle: "One window, one task."),
+                                      AnswerOption(title: "Tabs", subtitle: "Everything in one place."),
+                                      AnswerOption(title: "Honestly, both", subtitle: "Depends on the day.")],
                             pick: { state.styleAnswer = $0; advance() })
             case .answer:
                 SceneText(lines: [state.reply, "There is a faster way."], size: 52)
@@ -314,9 +320,9 @@ private struct OnboardingView: View {
                 .tracking(5.5)
                 .foregroundStyle(.white.opacity(0.5))
                 .textCase(.uppercase)
-            Text("Auge")
+            Text("AUGE")
                 .font(AppBrand.displayFont(112))
-                .tracking(3)
+                .tracking(6)
                 .foregroundStyle(.white)
             Text("See Beyond.")
                 .font(AppBrand.uiFont(15, weight: .medium))
@@ -620,106 +626,169 @@ private struct BloomMark: View {
     }
 }
 
+struct AnswerOption {
+    let title: String
+    let subtitle: String
+}
+
 private struct ChoiceScene: View {
     let prompt: String
-    let options: [String]
+    let options: [AnswerOption]
     let pick: (Int) -> Void
     @StateObject private var fade = FadeIn()
     @StateObject private var gate = ChoiceGate()
+    @StateObject private var nav = AnswerNav()
 
     var body: some View {
-        VStack(spacing: 34) {
-            SceneText(lines: [prompt], size: 56)
-            HStack(spacing: 18) {
+        VStack(spacing: 30) {
+            SceneText(lines: [prompt], size: 54)
+            HStack(spacing: 14) {
                 ForEach(Array(options.enumerated()), id: \.offset) { index, option in
-                    TiltCard(title: option) { if gate.armed { pick(index) } }
-                        .opacity(fade.shown ? 1 : 0)
-                        .offset(y: fade.shown ? 0 : 22)
-                        .animation(.spring(response: 0.9, dampingFraction: 0.86)
-                            .delay(Double(index) * 0.06), value: fade.shown)
+                    AnswerCard(option: option,
+                               hovered: nav.hovered == index,
+                               focused: nav.focused == index,
+                               selected: nav.selected == index) {
+                        choose(index)
+                    }
+                    .onHover { inside in
+                        if inside { nav.hovered = index }
+                        else if nav.hovered == index { nav.hovered = nil }
+                    }
+                    .opacity(fade.shown ? 1 : 0)
+                    .offset(y: fade.shown ? 0 : 16)
+                    .animation(.easeOut(duration: 0.45).delay(Double(index) * 0.05), value: fade.shown)
                 }
             }
-            Text("Pick one — you can change your mind later.")
-                .font(AppBrand.uiFont(12)).foregroundStyle(.white.opacity(0.3))
+            Text("← → and Return, or click")
+                .font(AppBrand.uiFont(12)).tracking(0.3)
+                .foregroundStyle(.white.opacity(0.26))
         }
         .onAppear {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { fade.shown = true }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { gate.armed = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { fade.shown = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { gate.armed = true }
+            nav.acted = { choose($0) }
+            nav.begin(count: options.count)
         }
+        .onDisappear { nav.end() }
     }
-}
 
-private final class Lean: ObservableObject {
-    @Published var tilt = CGPoint.zero
-    @Published var hovered = false
+    private func choose(_ index: Int) {
+        guard gate.armed, nav.selected == nil else { return }
+        withAnimation(.easeOut(duration: 0.18)) { nav.selected = index }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.26) { pick(index) }
+    }
 }
 
 private final class ChoiceGate: ObservableObject {
     @Published var armed = false
 }
 
-/// A card that leans toward the pointer: a gradient plate with a blurred copy of
-/// itself glowing behind, tilting on both axes with the pointer's position, so
-/// the card turns in your hand instead of only brightening.
-private struct TiltCard: View {
-    let title: String
-    let action: () -> Void
-    @StateObject private var lean = Lean()
+/// Pointer and arrow-key state for a question, plus the keyboard monitor.
+private final class AnswerNav: ObservableObject {
+    @Published var hovered: Int?
+    @Published var focused = 0
+    @Published var selected: Int?
+    private var monitor: Any?
 
-    private var gradient: LinearGradient {
-        LinearGradient(colors: [Color(red: 0.12, green: 0.64, blue: 1.0),
-                                Color(red: 0.48, green: 0.36, blue: 1.0),
-                                Color(red: 0.20, green: 0.86, blue: 0.92)],
-                       startPoint: .topLeading, endPoint: .bottomTrailing)
+    func begin(count: Int) {
+        hovered = nil; focused = 0; selected = nil
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            switch event.keyCode {
+            case 123:                                   // left
+                self.focused = max(0, self.focused - 1); return nil
+            case 124:                                   // right
+                self.focused = min(count - 1, self.focused + 1); return nil
+            case 48, 36:                                // tab, return
+                self.acted?(self.focused); return nil
+            case 53:
+                return event
+            default:
+                return event
+            }
+        }
+        _ = monitor
+    }
+
+    /// Set by the scene so Return can commit the focused card.
+    var acted: ((Int) -> Void)?
+
+    func end() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+    }
+}
+
+/// A quiet physical surface: charcoal plate, hairline border, and a lean of a few
+/// degrees at most. Selection tints it indigo and drops a small check in.
+private struct AnswerCard: View {
+    let option: AnswerOption
+    let hovered: Bool
+    let focused: Bool
+    let selected: Bool
+    let action: () -> Void
+
+    private var fill: Color {
+        if selected { return Color(red: 0.115, green: 0.118, blue: 0.175) }
+        if hovered { return Color(red: 0.105, green: 0.110, blue: 0.145) }
+        return Color(red: 0.090, green: 0.094, blue: 0.125)      // #171820
+    }
+
+    private var border: Color {
+        if selected { return Color(red: 0.46, green: 0.48, blue: 0.95).opacity(0.55) }
+        if focused  { return Color(red: 0.55, green: 0.60, blue: 1.0).opacity(0.45) }
+        if hovered  { return .white.opacity(0.16) }
+        return .white.opacity(0.09)
     }
 
     var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(gradient)
-                .blur(radius: lean.hovered ? 28 : 16)
-                .opacity(lean.hovered ? 0.8 : 0.3)
-                .scaleEffect(lean.hovered ? 1.04 : 0.96)
+        ZStack(alignment: .topTrailing) {
+            VStack(spacing: 5) {
+                Text(option.title)
+                    .font(AppBrand.uiFont(16, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.94))
+                Text(option.subtitle)
+                    .font(AppBrand.uiFont(12))
+                    .foregroundStyle(.white.opacity(0.40))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(gradient)
-                .brightness(lean.hovered ? 0.06 : 0)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(LinearGradient(colors: [.white.opacity(0.20), .clear],
-                                             startPoint: .top, endPoint: .bottom))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(.white.opacity(0.30), lineWidth: 1)
-                )
-                .overlay(
-                    Text(title)
-                        .font(AppBrand.uiFont(17, weight: .semibold))
-                        .tracking(0.2)
-                        .foregroundStyle(.white)
-                        .shadow(color: .black.opacity(0.25), radius: 6, y: 1)
-                )
-        }
-        .frame(width: 178, height: 104)
-        .rotation3DEffect(.degrees(Double(lean.tilt.y) * -12), axis: (x: 1, y: 0, z: 0), perspective: 0.5)
-        .rotation3DEffect(.degrees(Double(lean.tilt.x) * 14), axis: (x: 0, y: 1, z: 0), perspective: 0.5)
-        .animation(.easeOut(duration: 0.13), value: lean.tilt)
-        .animation(.easeOut(duration: 0.2), value: lean.hovered)
-        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .onTapGesture { action() }
-        .onContinuousHover { phase in
-            switch phase {
-            case .active(let p):
-                lean.hovered = true
-                lean.tilt = CGPoint(x: (p.x - 0.5) * 2, y: (p.y - 0.5) * 2)
-            case .ended:
-                lean.hovered = false
-                lean.tilt = .zero
+            if selected {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 18, height: 18)
+                    .background(Circle().fill(Color(red: 0.45, green: 0.47, blue: 0.95)))
+                    .padding(9)
+                    .transition(.opacity.combined(with: .scale(scale: 0.8)))
             }
         }
+        .frame(width: 204, height: 96)
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(fill))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(border, lineWidth: 1)
+        )
+        .overlay(
+            // the faintest lift off the background, no glow
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.white.opacity(selected ? 0.035 : 0.012))
+                .blendMode(.plusLighter)
+                .allowsHitTesting(false)
+        )
+        .scaleEffect(hovered ? 1.01 : 1)
+        .animation(.easeOut(duration: 0.18), value: hovered)
+        .animation(.easeOut(duration: 0.22), value: selected)
+        .animation(.easeOut(duration: 0.16), value: focused)
+        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .onTapGesture { action() }
     }
 }
+
 private struct GlowButton: View {
     let title: String
     let action: () -> Void

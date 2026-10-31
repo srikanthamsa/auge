@@ -189,6 +189,9 @@ private final class AugeAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        // Fonts must be registered before anything draws: on first run the film
+        // is presented below and needs the display face.
+        AppBrand.registerBundledFonts()
         installMainMenu()
         // Destroy any ghost items left by previous launches in the same process.
         guard statusItem == nil else { return }
