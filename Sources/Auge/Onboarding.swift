@@ -162,9 +162,9 @@ final class OnboardingState: ObservableObject {
     /// What the film says back, using the answer the person actually gave.
     var reply: String {
         switch styleAnswer {
-        case 0: return "You think in windows."
-        case 1: return "You live in tabs."
-        default: return "Windows and tabs, both."
+        case 0: return "That's literally 71% of people."
+        case 1: return "That's 96% of people. Every one of them."
+        default: return "That's literally 88% of people."
         }
     }
 
@@ -307,7 +307,7 @@ private struct OnboardingView: View {
                 .tracking(5.5)
                 .foregroundStyle(.white.opacity(0.5))
                 .textCase(.uppercase)
-            Text("Auge.")
+            Text("Auge")
                 .font(AppBrand.displayFont(112))
                 .tracking(3)
                 .foregroundStyle(.white)
@@ -515,39 +515,38 @@ private struct OnboardingView: View {
 /// clock, so it is as slow as the person holds.
 private struct Bloom: View {
     let start: Date
-
-    private let green = Color(red: 0.20, green: 0.95, blue: 0.52)
-    private let deep = Color(red: 0.05, green: 0.62, blue: 0.34)
+    /// Where on the screen it begins: the Fn key itself, not the middle.
+    var origin = CGPoint(x: 0.5, y: 0.58)
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 60)) { context in
             let t = context.date.timeIntervalSince(start)
-            let eased = 1 - exp(-t * 1.05)            // fast start, long slow tail
+            // Creep, not bloom: a slow square-root front, so the first seconds
+            // are a stain spreading and the last seconds are the screen filling.
+            let reach = 0.045 + sqrt(t) * 0.16
             GeometryReader { geo in
                 let w = geo.size.width, h = geo.size.height
+                let cx = w * origin.x, cy = h * origin.y
+                let unit = min(w, h)
                 ZStack {
-                    // Six lobes on different clocks: no side grows in step.
-                    ForEach(0..<6, id: \.self) { i in
-                        let phase = Double(i) * 1.7
-                        let breathe = 1 + sin(t * (0.55 + Double(i) * 0.09) + phase) * 0.13
-                        let r = min(w, h) * (0.16 + eased * 1.35) * breathe
-                        let dx = cos(t * (0.35 + Double(i) * 0.05) + phase) * w * 0.10 * eased
-                        let dy = sin(t * (0.29 + Double(i) * 0.06) + phase) * h * 0.13 * eased
+                    // Ten lobes, each on its own clock and its own bias, so the
+                    // edge never resolves into a circle.
+                    ForEach(0..<10, id: \.self) { i in
+                        let phase = Double(i) * 2.3
+                        let creep = sqrt(t) * (0.10 + Double(i % 4) * 0.035)
+                        let breathe = 1 + sin(t * (0.42 + Double(i) * 0.06) + phase) * 0.16
+                        let r = unit * (0.035 + reach * (0.55 + Double(i % 3) * 0.22)) * breathe
+                        let dx = cos(phase * 2 + t * 0.18) * unit * (0.05 + creep) * 0.9
+                        let dy = sin(phase * 1.7 + t * 0.15) * unit * (0.05 + creep) * 0.75
                         Circle()
-                            .fill(RadialGradient(colors: [green.opacity(0.55), deep.opacity(0.34)],
-                                                 center: .center, startRadius: 0, endRadius: r))
+                            .fill(.white.opacity(0.92))
                             .frame(width: r * 2, height: r * 2)
-                            .blur(radius: min(w, h) * 0.09)
-                            .blendMode(.plusLighter)
-                            .offset(x: dx, y: dy)
+                            .blur(radius: unit * 0.11)
+                            .position(x: cx + dx, y: cy + dy)
                     }
-                    // The wash that eventually owns the screen.
-                    RadialGradient(colors: [green.opacity(0.30 * eased), deep.opacity(0.55 * eased)],
-                                   center: .center,
-                                   startRadius: 0,
-                                   endRadius: min(w, h) * (0.3 + eased * 1.1))
                 }
                 .frame(width: w, height: h)
+                .opacity(min(1, 0.15 + t * 0.9))
             }
             .ignoresSafeArea()
         }
@@ -629,37 +628,40 @@ private struct GlowButton: View {
 
     private let inner = Color(red: 0.31, green: 0.85, blue: 1.0)
     private let outer = Color(red: 0.66, green: 0.95, blue: 1.0)
-    private let blob1 = Color(red: 0.10, green: 0.78, blue: 1.0).opacity(0.7)
-    private let blob2 = Color(red: 0.10, green: 0.48, blue: 1.0)
-    private let blob3 = Color(red: 0.10, green: 0.88, blue: 0.86)
-    private let blob4 = Color(red: 0.55, green: 0.94, blue: 1.0).opacity(0.7)
+    private let blob1 = Color(red: 0.10, green: 0.85, blue: 1.0).opacity(0.85)
+    private let blob2 = Color(red: 0.42, green: 0.30, blue: 1.0).opacity(0.9)
+    private let blob3 = Color(red: 1.0, green: 0.28, blue: 0.72).opacity(0.85)
+    private let blob4 = Color(red: 0.55, green: 1.0, blue: 0.45).opacity(0.7)
 
     var body: some View {
         Button(action: action) {
             TimelineView(.animation(minimumInterval: 1.0 / 30)) { context in
                 let t = context.date.timeIntervalSinceReferenceDate
                 ZStack {
-                    Circle().fill(blob1).frame(width: 40, height: 40)
-                        .blur(radius: 12)
-                        .offset(x: sin(t * 0.9) * 40, y: cos(t * 0.7) * 22)
-                    Circle().fill(blob2).frame(width: 40, height: 40)
-                        .blur(radius: 14)
-                        .offset(x: 48 + cos(t * 0.6) * 30, y: -14 + sin(t * 0.8) * 18)
-                    Circle().fill(blob3).frame(width: 40, height: 40)
+                    Circle().fill(blob1).frame(width: 44, height: 44)
+                        .blur(radius: 13)
+                        .offset(x: sin(t * 0.9) * 44, y: cos(t * 0.7) * 22)
+                    Circle().fill(blob2).frame(width: 46, height: 46)
+                        .blur(radius: 15)
+                        .offset(x: 46 + cos(t * 0.6) * 34, y: -14 + sin(t * 0.8) * 18)
+                    Circle().fill(blob3).frame(width: 44, height: 44)
                         .blur(radius: 16)
-                        .offset(x: -10 + sin(t * 0.5) * 26, y: 8 + cos(t * 1.1) * 16)
+                        .offset(x: -12 + sin(t * 0.5) * 30, y: 10 + cos(t * 1.1) * 16)
                     Circle().fill(blob4).frame(width: 40, height: 40)
-                        .blur(radius: 8)
-                        .offset(x: 60 + sin(t * 0.75) * 24, y: 6 + cos(t * 0.55) * 20)
+                        .blur(radius: 12)
+                        .offset(x: 58 + sin(t * 0.75) * 28, y: 8 + cos(t * 0.55) * 20)
                 }
                 .frame(width: 132, height: 46)
                 .clipped()
             }
             .frame(width: 132, height: 46)
+            .compositingGroup()
+            .blendMode(.plusLighter)
             .background(
                 RoundedRectangle(cornerRadius: 23, style: .continuous)
                     .fill(RadialGradient(colors: [inner, outer],
                                          center: .center, startRadius: 2, endRadius: 90))
+                    .opacity(0.55)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 23, style: .continuous)
