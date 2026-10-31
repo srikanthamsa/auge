@@ -467,7 +467,7 @@ private struct OnboardingView: View {
             .opacity(ui.stage3 ? 1 : 0)
             .animation(.easeOut(duration: 0.5), value: ui.stage3)
 
-            PrimaryButton(title: "Open Auge") { onFinish() }
+            GlowButton(title: "Open Auge  →") { onFinish() }
                 .padding(.top, 34)
                 .opacity(ui.stage4 ? 1 : 0)
                 .animation(.easeOut(duration: 0.5), value: ui.stage4)
@@ -960,10 +960,10 @@ private struct GlowButton: View {
                         .blur(radius: 12)
                         .offset(x: 58 + sin(t * 0.75) * 28, y: 8 + cos(t * 0.55) * 20)
                 }
-                .frame(width: 132, height: 46)
+                .frame(width: 176, height: 46)
                 .clipped()
             }
-            .frame(width: 132, height: 46)
+            .frame(width: 176, height: 46)
             .compositingGroup()
             .blendMode(.plusLighter)
             .background(
